@@ -38,6 +38,7 @@ from src.metrics.embedding_metrics import (
     plot_tsne,
     validate_embeddings,
 )
+from src.utils.html_report import build_report
 
 
 def load_npz(path):
@@ -117,6 +118,7 @@ def parse_args():
     parser.add_argument("--negative-label", type=int, default=-1, help="Label id for negative class")
     parser.add_argument("--topk", nargs="+", type=int, default=[1, 3, 5, 10], help="K values for Recall@K / Precision@K")
     parser.add_argument("--class-names", default=None, help="Path to class_names.json")
+    parser.add_argument("--generate-html", default="true", help="Generate HTML report (true/false)")
     return parser.parse_args()
 
 
@@ -312,6 +314,36 @@ def main():
     if top_confusing:
         print(f"\nTop confusing pair: {top_confusing[0]['name_i']} <-> {top_confusing[0]['name_j']} (sim={top_confusing[0]['similarity']:.4f})")
     print("=" * 60)
+
+    # ---- HTML report ----
+    if str_to_bool(args.generate_html):
+        print("\nGenerating HTML report ...")
+        report_html = build_report(
+            input_path=args.input,
+            embeddings_shape=(len(labels), embeddings.shape[1]),
+            num_classes=len(unique_labels),
+            do_normalize=do_normalize,
+            exclude_negative=exclude_negative,
+            negative_label=negative_label,
+            ks=ks,
+            intra=intra,
+            inter=inter,
+            gap=gap,
+            retrieval=retrieval,
+            nn=nn,
+            top_confusing=top_confusing,
+            per_class_rows=per_class_rows,
+            class_names=class_names,
+            unique_labels=unique_labels,
+            counts=counts,
+            sim_png_path=sim_png_path,
+            cm_png_path=cm_png_path,
+            tsne_png_path=tsne_path,
+        )
+        report_path = os.path.join(args.output_dir, "report.html")
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(report_html)
+        print(f"\nHTML report saved to: {report_path}")
 
 
 if __name__ == "__main__":
