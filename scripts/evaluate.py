@@ -1,0 +1,99 @@
+import argparse
+import json
+import os
+import sys
+
+import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from src.datasets.pointcloud_dataset import PointCloudDataset
+from src.metrics.classification_metrics import compute_metrics, plot_confusion_matrix
+from src.models.metric_model import MetricPointNet
+from src.utils.checkpoint import load_checkpoint
+from src.utils.config import load_config
+
+
+def collate_fn(batch):
+    points = torch.stack([b["points"] for b in batch])
+    labels = torch.tensor([b["label"] for b in batch], dtype=torch.long)
+    return {"points": points, "label": labels}
+
+
+@torch.no_grad()
+def run_evaluation(model, loader, device, num_known_classes, negative_label):
+    model.eval()
+    all_labels = []
+    all_preds = []
+    all_probs = []
+    for batch in tqdm(loader, desc="Evaluate"):
+        points = batch["points"].to(device)
+        out = model(points)
+        probs = torch.softmax(out["logits"], dim=1)
+        preds = out["logits"].argmax(dim=1).cpu().numpy()
+        all_preds.extend(preds)
+        all_labels.extend(batch["label"].numpy())
+        all_probs.extend(probs.cpu().numpy())
+    metrics = compute_metrics(
+        all_labels, all_preds, all_probs,
+        num_known_classes=num_known_classes,
+        negative_label=negative_label,
+    )
+    return metrics, all_labels, all_preds
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate PointNet model")
+    parser.add_argument("--config", type=str, default="configs/config.yaml")
+    parser.add_argument("--checkpoint", type=str, default="outputs/checkpoints/best.pt")
+    parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
+    args = parser.parse_args()
+
+    cfg = load_config(args.config)
+    device = torch.device(cfg["device"] if torch.cuda.is_available() else "cpu")
+
+    dataset = PointCloudDataset(
+        root_dir=cfg["data"]["root"],
+        split=args.split,
+        num_points=cfg["num_points"],
+        input_channels=cfg["input_channels"],
+        augmentation_config={},
+    )
+    loader = DataLoader(dataset, batch_size=cfg["train"]["batch_size"], shuffle=False, num_workers=4, collate_fn=collate_fn)
+
+    model = MetricPointNet(
+        input_channels=cfg["input_channels"],
+        num_classes=cfg["num_classes"],
+        embedding_dim=cfg["embedding_dim"],
+    ).to(device)
+    load_checkpoint(args.checkpoint, model)
+
+    metrics, y_true, y_pred = run_evaluation(model, loader, device, cfg["num_known_classes"], cfg["negative_label"])
+
+    os.makedirs("outputs/reports", exist_ok=True)
+
+    with open("outputs/reports/evaluation.json", "w") as f:
+        json.dump(metrics, f, indent=2, ensure_ascii=False)
+    print(f"Metrics saved to outputs/reports/evaluation.json")
+
+    class_names_path = os.path.join(os.path.dirname(args.config), "class_names.json")
+    if os.path.exists(class_names_path):
+        with open(class_names_path) as f:
+            name_map = json.load(f)
+        class_names = [name_map[str(i)] for i in range(cfg["num_classes"])]
+    else:
+        class_names = [f"class_{i:03d}" for i in range(cfg["num_known_classes"])] + ["negative"]
+
+    plot_confusion_matrix(y_true, y_pred, class_names, "outputs/reports/confusion_matrix.png")
+    print("Confusion matrix saved to outputs/reports/confusion_matrix.png")
+
+    print(f"\nOverall Accuracy: {metrics['overall_accuracy']:.4f}")
+    print(f"Known-class Accuracy: {metrics['known_class_accuracy']:.4f}")
+    print(f"Negative Accuracy: {metrics['negative_accuracy']:.4f}")
+    print(f"Macro F1: {metrics['macro_f1']:.4f}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,7 @@
+torch>=2.7.0
+numpy
+pyyaml
+scikit-learn
+matplotlib
+tqdm
+open3d

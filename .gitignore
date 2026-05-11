@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model outputs (keep .gitkeep)
+outputs/checkpoints/*
+!outputs/checkpoints/.gitkeep
+outputs/logs/*
+!outputs/logs/.gitkeep
+outputs/reports/*
+!outputs/reports/.gitkeep
+
+# Dataset files (large binary data)
+dataset/train/
+dataset/val/
+dataset/test/
+dataset/label/
+dataset/label.zip
+
+raw_pcd_dataset/train/
+raw_pcd_dataset/val/
+raw_pcd_dataset/test/
