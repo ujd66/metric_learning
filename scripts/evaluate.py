@@ -82,6 +82,8 @@ def main():
     parser.add_argument("--config", type=str, default="configs/config.yaml")
     parser.add_argument("--checkpoint", type=str, default="outputs/checkpoints/best.pt")
     parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Output directory (default: outputs/reports)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -114,27 +116,32 @@ def main():
 
     metrics, y_true, y_pred = run_evaluation(model, loader, device, num_known_classes, negative_label)
 
-    os.makedirs("outputs/reports", exist_ok=True)
+    report_dir = args.output_dir or "outputs/reports"
+    os.makedirs(report_dir, exist_ok=True)
 
     # Save metrics JSON
-    with open("outputs/reports/evaluation.json", "w") as f:
+    eval_path = os.path.join(report_dir, "evaluation.json")
+    with open(eval_path, "w") as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
-    print(f"Metrics saved to outputs/reports/evaluation.json")
+    print(f"Metrics saved to {eval_path}")
 
     # Class names
     class_names = load_class_names(args.config, num_classes)
 
     # Confusion matrix
-    plot_confusion_matrix(y_true, y_pred, class_names, "outputs/reports/confusion_matrix.png")
-    print("Confusion matrix saved to outputs/reports/confusion_matrix.png")
+    cm_path = os.path.join(report_dir, "confusion_matrix.png")
+    plot_confusion_matrix(y_true, y_pred, class_names, cm_path)
+    print(f"Confusion matrix saved to {cm_path}")
 
     # Normalized confusion matrix
-    plot_normalized_confusion_matrix(y_true, y_pred, class_names, "outputs/reports/confusion_matrix_normalized.png")
-    print("Normalized confusion matrix saved to outputs/reports/confusion_matrix_normalized.png")
+    cmn_path = os.path.join(report_dir, "confusion_matrix_normalized.png")
+    plot_normalized_confusion_matrix(y_true, y_pred, class_names, cmn_path)
+    print(f"Normalized confusion matrix saved to {cmn_path}")
 
     # Per-class CSV
-    save_per_class_csv(metrics, class_names, num_classes, "outputs/reports/per_class_metrics.csv", args.split)
-    print("Per-class metrics saved to outputs/reports/per_class_metrics.csv")
+    pc_csv_path = os.path.join(report_dir, "per_class_metrics.csv")
+    save_per_class_csv(metrics, class_names, num_classes, pc_csv_path, args.split)
+    print(f"Per-class metrics saved to {pc_csv_path}")
 
     # Check for missing classes in this split
     present_labels = set(y_true)

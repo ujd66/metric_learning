@@ -6,6 +6,11 @@ def load_config(path):
         return yaml.safe_load(f)
 
 
+def get_default_config():
+    import copy
+    return copy.deepcopy(_DEFAULT_CONFIG)
+
+
 _DEFAULT_CONFIG = {
     "seed": 42,
     "device": "cuda",
@@ -43,9 +48,32 @@ _DEFAULT_CONFIG = {
         "use_class_weight": True,
         "class_weight_max": 10.0,
     },
+    "experiment": {
+        "name": "pointnet_ce_supcon",
+        "output_subdir": "ce_supcon",
+    },
+    "loss": {
+        "ce_weight": 1.0,
+        "metric_type": "supcon",
+        "metric_weight": 0.05,
+        "temperature": 0.07,
+        "include_negative_in_metric_loss": False,
+        "warmup_epochs_for_metric_loss": 10,
+    },
+    "metric_learning": {
+        "enabled": False,
+        "normalize_embedding": True,
+        "exclude_negative": True,
+        "hard_pair_focus": True,
+    },
+    "sampler": {
+        "use_pk_sampler": False,
+        "classes_per_batch": 8,
+        "samples_per_class": 4,
+        "include_negative": False,
+        "drop_singleton_classes": True,
+    },
+    "analysis": {
+        "focus_class_pairs": [],
+    },
 }
-
-
-def get_default_config():
-    import copy
-    return copy.deepcopy(_DEFAULT_CONFIG)

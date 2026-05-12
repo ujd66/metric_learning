@@ -173,19 +173,6 @@ python scripts/validate_dataset.py \
 
 报告保存到 `outputs/reports/dataset_validation.json`。
 
-### 5. 训练
-
-```bash
-python scripts/train.py --config configs/config.yaml
-```
-
-### 两种数据划分方式
-
-| 方式 | 命令 | 适用场景 |
-|------|------|----------|
-| **自动划分**（推荐） | `prepare_pcd_dataset.py --flat` + `rebuild_split.py` | 从原始数据开始，需要确保每类都有 val/test |
-| **手动 mapping** | 按 `sample_mapping.json` 复制到 `raw_pcd_dataset/` | 已有固定划分方案 |
-
 ## 配置
 
 编辑 `configs/config.yaml` 修改超参数。编辑 `configs/class_names.json` 修改类别名称。
@@ -306,7 +293,199 @@ python scripts/visualize_embeddings.py \
 3. t-SNE 显示同类有一定聚集趋势
 4. 没有训练异常（loss NaN、acc 不动等）
 
-## 训练
+## 2.1 轮：Metric Learning 训练（CE + SupCon）
+
+在 baseline 确认正常后，加入 Supervised Contrastive Loss 进行 metric learning 增强。
+
+### 原理
+
+训练总 loss：
+
+```
+total_loss = ce_weight * CE_loss + metric_weight * SupCon_loss
+```
+
+- `CE_loss`：标准交叉熵，包含所有类别（含 negative）
+- `SupCon_loss`：Supervised Contrastive Loss，默认排除 negative 类
+- `warmup_epochs_for_metric_loss`：前 N 个 epoch 只用 CE，之后加入 metric loss
+- `temperature`：控制 contrastive loss 对 hard negatives 的关注程度
+
+### 配置
+
+`configs/config.yaml` 中控制 metric learning 的部分：
+
+```yaml
+experiment:
+  name: "pointnet_ce_supcon"
+  output_subdir: "ce_supcon"
+
+loss:
+  ce_weight: 1.0
+  metric_type: "supcon"
+  metric_weight: 0.05
+  temperature: 0.07
+  include_negative_in_metric_loss: false
+  warmup_epochs_for_metric_loss: 10
+
+metric_learning:
+  enabled: true
+  normalize_embedding: true
+  exclude_negative: true
+
+sampler:
+  use_pk_sampler: true
+  classes_per_batch: 8
+  samples_per_class: 4
+  include_negative: false
+  drop_singleton_classes: true
+```
+
+关闭 metric learning（恢复 baseline 行为）：
+
+```yaml
+metric_learning:
+  enabled: false
+sampler:
+  use_pk_sampler: false
+```
+
+### 1. 运行 CE + SupCon 训练
+
+```bash
+python scripts/train.py --config configs/config.yaml
+```
+
+输出到 `outputs/runs/ce_supcon/`：
+- `training_curves.png` — 训练曲线（含 metric loss 曲线）
+- `training_history.json` — 每 epoch 详细指标
+- `checkpoints/best.pt` — best model
+- `checkpoints/last.pt` — last model
+- `best_val_per_class_metrics.json` — best checkpoint 的每类指标
+
+每个 epoch 输出：
+- Train Total Loss (CE Loss) Acc
+- Metric Loss (w=current_weight)
+- Val Loss / Acc
+- Macro P / R / F1
+- Known Acc / Neg Acc
+- LR
+
+### 2. 评价分类效果
+
+```bash
+python scripts/evaluate.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/runs/ce_supcon/checkpoints/best.pt \
+  --split test \
+  --output-dir outputs/runs/ce_supcon/eval_test
+```
+
+### 3. 生成 Embedding 评估
+
+```bash
+# 先提取 embedding
+python scripts/visualize_embeddings.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/runs/ce_supcon/checkpoints/best.pt \
+  --split test \
+  --output-dir outputs/runs/ce_supcon/embedding_test
+
+# 然后评估 embedding 质量
+python scripts/evaluate_embeddings.py \
+  --input outputs/runs/ce_supcon/embedding_test/embedding_features.npy \
+  --output-dir outputs/runs/ce_supcon/embedding_eval_test \
+  --normalize true \
+  --exclude-negative true \
+  --negative-label 19 \
+  --topk 1 3 5 10 \
+  --class-names configs/class_names.json
+```
+
+注意：evaluate_embeddings.py 的输入需要同时包含 embedding 和 labels。更方便的方式是手动组装 npz：
+
+```python
+import numpy as np
+features = np.load("outputs/runs/ce_supcon/embedding_test/embedding_features.npy")
+labels = np.load("outputs/runs/ce_supcon/embedding_test/embedding_labels.npy")
+np.savez("outputs/runs/ce_supcon/embedding_eval_test/embeddings.npz",
+    embeddings=features, labels=labels)
+```
+
+```bash
+python scripts/evaluate_embeddings.py \
+  --input outputs/runs/ce_supcon/embedding_eval_test/embeddings.npz \
+  --output-dir outputs/runs/ce_supcon/embedding_eval_test \
+  --normalize true \
+  --exclude-negative true \
+  --negative-label 19 \
+  --topk 1 3 5 10 \
+  --class-names configs/class_names.json \
+  --config configs/config.yaml
+```
+
+### 4. 和 Baseline 对比
+
+```bash
+python scripts/compare_embedding_reports.py \
+  --baseline-json outputs/reports/embedding_eval/metrics_summary.json \
+  --new-json outputs/runs/ce_supcon/embedding_eval_test/metrics_summary.json \
+  --output outputs/runs/ce_supcon/comparison_report.html
+```
+
+输出：
+- `comparison_report.html` — 可视化对比报告（提升/下降/不变标记）
+- `comparison_report_metrics.csv` — 对比数据 CSV
+
+### 5. 建议尝试的超参数
+
+| 实验 | metric_weight | temperature | warmup_epochs |
+|------|---------------|-------------|---------------|
+| CE baseline | 0 (disabled) | - | - |
+| CE + SupCon (保守) | 0.05 | 0.07 | 10 |
+| CE + SupCon (激进) | 0.1 | 0.07 | 10 |
+
+### PKSampler 说明
+
+PKSampler 确保每个 batch 包含 P 个类别、每类 K 个样本：
+
+- `classes_per_batch = 8`，`samples_per_class = 4` → batch_size = 32
+- 少样本类会使用有放回采样
+- 默认排除 singleton 类和 negative 类
+- 如果可用类别不足 P，自动降低 P 并给出 warning
+
+### Negative 类处理
+
+- CrossEntropyLoss 始终包含 negative label（分类需要识别 negative）
+- SupConLoss 默认排除 negative 样本（negative 内部多样性大，不应强制聚成一团）
+- 设置 `include_negative_in_metric_loss: true` 可让 negative 参与 metric loss
+
+### Focus Class Pairs
+
+在 `config.yaml` 中配置关注的混淆类别对：
+
+```yaml
+analysis:
+  focus_class_pairs:
+    - ["changtiaofalan", "teshujiaqiangtieduantou"]
+```
+
+evaluate_embeddings.py 会输出这些类别对的详细分析：
+- 平均/最大/最小相似度
+- 最相似的样本对 (CSV)
+- 对比前后的相似度变化
+
+### 进入下一阶段的标准
+
+满足以下所有条件时，可以进入 prototype / unknown rejection 阶段：
+
+1. Val Macro F1 不低于 baseline 超过 3 个百分点
+2. Recall@1 不低于 baseline
+3. Similarity gap 不低于 baseline
+4. Top confusing pair similarity 有下降，或者至少不升高
+5. Negative accuracy 不明显恶化
+6. 训练稳定，无 NaN
+
+## 训练（baseline）
 
 ```bash
 python scripts/train.py --config configs/config.yaml
@@ -401,7 +580,8 @@ python scripts/evaluate_embeddings.py \
     --exclude-negative true \
     --negative-label -1 \
     --topk 1 3 5 10 \
-    --class-names configs/class_names.json
+    --class-names configs/class_names.json \
+    --config configs/config.yaml
 ```
 
 参数说明：
@@ -410,6 +590,7 @@ python scripts/evaluate_embeddings.py \
 - `--negative-label`：negative 类的 label id
 - `--topk`：Recall@K / Precision@K 的 K 值列表
 - `--class-names`：类别名称映射文件路径
+- `--config`：config.yaml 路径（用于读取 focus_class_pairs 配置）
 
 ### 评价指标说明
 
@@ -431,12 +612,15 @@ python scripts/evaluate_embeddings.py \
 | 文件 | 内容 |
 |------|------|
 | `metrics.json` | 所有数值指标汇总 |
+| `metrics_summary.json` | 扁平化指标摘要（用于对比脚本） |
 | `per_class_metrics.csv` | 每个类别的详细指标 |
 | `class_similarity_matrix.csv` | 类别间 cosine similarity 矩阵 |
 | `class_similarity_matrix.png` | 类别间相似度热力图 |
 | `confusion_matrix.png` | 1-NN 分类混淆矩阵 |
 | `top_confusing_pairs.csv` | 最容易混淆的类别对 |
 | `embedding_tsne.png` | t-SNE 可视化 |
+| `focus_pair_analysis.json` | 关注类别对的详细分析 |
+| `focus_pair_*_top_similar.csv` | 关注类别对最相似的样本对 |
 
 ### 如何解读结果
 

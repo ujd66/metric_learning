@@ -79,6 +79,8 @@ def main():
     parser.add_argument("--config", type=str, default="configs/config.yaml")
     parser.add_argument("--checkpoint", type=str, default="outputs/checkpoints/best.pt")
     parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"])
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Output directory (default: outputs/reports)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -121,13 +123,14 @@ def main():
         class_names = {str(i): f"class_{i:03d}" for i in range(num_classes)}
 
     # Save embeddings
-    os.makedirs("outputs/reports", exist_ok=True)
-    np.save("outputs/reports/embedding_features.npy", embeddings)
-    np.save("outputs/reports/embedding_labels.npy", labels)
+    out_dir = args.output_dir or "outputs/reports"
+    os.makedirs(out_dir, exist_ok=True)
+    np.save(os.path.join(out_dir, "embedding_features.npy"), embeddings)
+    np.save(os.path.join(out_dir, "embedding_labels.npy"), labels)
     print(f"Embeddings saved: features {embeddings.shape}, labels {labels.shape}")
 
     # Plot
-    save_path = f"outputs/reports/embedding_tsne_{args.split}.png"
+    save_path = os.path.join(out_dir, f"embedding_tsne_{args.split}.png")
     plot_tsne(embeddings, labels, class_names, negative_label, save_path)
 
 

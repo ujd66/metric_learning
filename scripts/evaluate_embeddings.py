@@ -14,6 +14,7 @@ Usage:
 """
 
 import argparse
+import csv
 import json
 import os
 import sys
@@ -119,6 +120,7 @@ def parse_args():
     parser.add_argument("--topk", nargs="+", type=int, default=[1, 3, 5, 10], help="K values for Recall@K / Precision@K")
     parser.add_argument("--class-names", default=None, help="Path to class_names.json")
     parser.add_argument("--generate-html", default="true", help="Generate HTML report (true/false)")
+    parser.add_argument("--config", default=None, help="Path to config.yaml for focus_class_pairs")
     return parser.parse_args()
 
 
@@ -131,6 +133,11 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     do_normalize = str_to_bool(args.normalize)
+    cfg = {}
+    if args.config:
+        import yaml
+        with open(args.config, "r") as f:
+            cfg = yaml.safe_load(f)
     exclude_negative = str_to_bool(args.exclude_negative)
     negative_label = args.negative_label
     ks = sorted(set(args.topk))
@@ -242,6 +249,26 @@ def main():
         json.dump(metrics_dict, f, indent=2, ensure_ascii=False)
     print(f"\nSaved: {metrics_path}")
 
+    # Save a flat metrics_summary.json for easy comparison
+    # Ensure all keys are JSON-serializable (convert numpy types)
+    intra_ser = {
+        "macro_avg": float(intra["macro_avg"]) if not isinstance(intra["macro_avg"], float) else intra["macro_avg"],
+        "global_avg": float(intra["global_avg"]) if not isinstance(intra["global_avg"], float) else intra["global_avg"],
+    }
+    summary = {
+        "intra_class_similarity": intra_ser,
+        "inter_class_similarity": {"global_avg": float(inter["global_avg"])},
+        "similarity_gap": float(gap),
+        "recall_at_k": {f"recall@{k}": float(v) for k, v in retrieval["recall_at_k"].items()},
+        "precision_at_k": {f"precision@{k}": float(v) for k, v in retrieval["precision_at_k"].items()},
+        "nn_accuracy": float(nn["nn_accuracy"]),
+        "top_confusing_pairs": top_confusing,
+    }
+    summary_path = os.path.join(args.output_dir, "metrics_summary.json")
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False, default=str)
+    print(f"Saved: {summary_path}")
+
     # per_class_metrics.csv
     per_class_rows = []
     for lbl in unique_labels:
@@ -314,6 +341,74 @@ def main():
     if top_confusing:
         print(f"\nTop confusing pair: {top_confusing[0]['name_i']} <-> {top_confusing[0]['name_j']} (sim={top_confusing[0]['similarity']:.4f})")
     print("=" * 60)
+
+    # ---- Focus class pair analysis ----
+    focus_cfg = cfg.get("analysis", {}).get("focus_class_pairs", []) if args.config else []
+    if focus_cfg:
+        print("\nAnalyzing focus class pairs ...")
+        focus_results = []
+        inter_names = [class_names[l] if l < len(class_names) else str(l) for l in inter["unique_labels"]]
+        for pair_names in focus_cfg:
+            if len(pair_names) != 2:
+                continue
+            name_a, name_b = pair_names
+            idx_a = next((i for i, n in enumerate(inter_names) if n == name_a), None)
+            idx_b = next((i for i, n in enumerate(inter_names) if n == name_b), None)
+            if idx_a is None or idx_b is None:
+                warnings.warn(f"Focus pair {name_a} <-> {name_b}: class name not found, skipping")
+                continue
+            pair_sim = inter["class_similarity_matrix"][idx_a, idx_b]
+            # Also find per-sample similarities
+            label_a = inter["unique_labels"][idx_a]
+            label_b = inter["unique_labels"][idx_b]
+            mask_a = labels == label_a
+            mask_b = labels == label_b
+            sub = sim_matrix[np.ix_(np.where(mask_a)[0], np.where(mask_b)[0])]
+            focus_results.append({
+                "pair": f"{name_a} <-> {name_b}",
+                "class_a": name_a,
+                "class_b": name_b,
+                "avg_similarity": float(np.mean(sub)) if sub.size > 0 else float("nan"),
+                "max_similarity": float(np.max(sub)) if sub.size > 0 else float("nan"),
+                "min_similarity": float(np.min(sub)) if sub.size > 0 else float("nan"),
+                "num_sample_pairs": int(sub.size),
+                "class_similarity": float(pair_sim),
+            })
+            print(f"  {name_a} <-> {name_b}: avg={focus_results[-1]['avg_similarity']:.4f}, "
+                  f"max={focus_results[-1]['max_similarity']:.4f}, "
+                  f"pairs={focus_results[-1]['num_sample_pairs']}")
+
+        if focus_results:
+            focus_path = os.path.join(args.output_dir, "focus_pair_analysis.json")
+            with open(focus_path, "w") as f:
+                json.dump(focus_results, f, indent=2, ensure_ascii=False)
+            print(f"Saved: {focus_path}")
+
+            # Save top similar sample pairs for each focus pair
+            for fr in focus_results:
+                pair_tag = f"{fr['class_a']}_{fr['class_b']}"
+                mask_a = labels == [l for l, n in zip(inter["unique_labels"], inter_names) if n == fr["class_a"]][0]
+                mask_b = labels == [l for l, n in zip(inter["unique_labels"], inter_names) if n == fr["class_b"]][0]
+                idx_a_all = np.where(mask_a)[0]
+                idx_b_all = np.where(mask_b)[0]
+                sub = sim_matrix[np.ix_(idx_a_all, idx_b_all)]
+                # Top 10 most similar pairs
+                flat_idx = np.argsort(sub.ravel())[::-1][:10]
+                top_pairs = []
+                for fi in flat_idx:
+                    i_a, i_b = np.unravel_index(fi, sub.shape)
+                    top_pairs.append({
+                        "sample_a_index": int(idx_a_all[i_a]),
+                        "sample_b_index": int(idx_b_all[i_b]),
+                        "similarity": float(sub[i_a, i_b]),
+                    })
+                pair_csv_path = os.path.join(args.output_dir, f"focus_pair_{pair_tag}_top_similar.csv")
+                with open(pair_csv_path, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["sample_a_index", "sample_b_index", "similarity"])
+                    for tp in top_pairs:
+                        writer.writerow([tp["sample_a_index"], tp["sample_b_index"], f"{tp['similarity']:.6f}"])
+                print(f"Saved: {pair_csv_path}")
 
     # ---- HTML report ----
     if str_to_bool(args.generate_html):

@@ -38,3 +38,33 @@ train:
   optimizer: "adamw"
   use_class_weight: true
   class_weight_max: 10.0
+
+# When metric_learning.enabled=false, training is identical to baseline CE.
+experiment:
+  name: "pointnet_ce_supcon"
+  output_subdir: "ce_supcon"
+
+loss:
+  ce_weight: 1.0
+  metric_type: "supcon"
+  metric_weight: 0.05
+  temperature: 0.07
+  include_negative_in_metric_loss: false
+  warmup_epochs_for_metric_loss: 10
+
+metric_learning:
+  enabled: true
+  normalize_embedding: true
+  exclude_negative: true
+  hard_pair_focus: true
+
+sampler:
+  use_pk_sampler: false
+  classes_per_batch: 8
+  samples_per_class: 4
+  include_negative: false
+  drop_singleton_classes: true
+
+analysis:
+  focus_class_pairs:
+    - ["changtiaofalan", "teshujiaqiangtieduantou"]
