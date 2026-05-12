@@ -40,7 +40,67 @@ INFERENCE_README = """# PointNet Baseline Inference Bundle
 ## Overview
 
 This bundle contains everything needed for point cloud classification inference
-with prototype-based unknown/negative rejection.
+with a unified 3-stage decision pipeline:
+  1. Classifier negative detection
+  2. Prototype-based unknown rejection
+  3. Gallery retrieval for evidence (optional)
+
+## Decision Logic (Priority Order)
+
+### Step 1: Classifier Negative Detection (HIGHEST PRIORITY)
+If the classifier predicts label 19 (negative) → **"negative"**
+This is the first priority. If the classifier is confident the sample is negative,
+no further checks are needed.
+
+### Step 2: Prototype OOD Rejection (PRIMARY unknown mechanism)
+If NOT classified as negative:
+- Compute cosine similarity between embedding and all known class prototypes
+- If nearest prototype similarity < threshold → **"unknown"**
+- This is the PRIMARY mechanism for unknown/out-of-distribution rejection
+- Recommended threshold: 0.90~0.91
+
+### Step 3: Known Class Output
+If the sample passes prototype threshold:
+- final_type = "known"
+- final_label = nearest prototype's class name
+
+### Step 4: Gallery Evidence (AUXILIARY ONLY)
+If gallery.pt is provided:
+- Retrieve top-K most similar gallery samples
+- Output as evidence for human review
+- **Gallery retrieval does NOT override the final_label**
+- Gallery nearest-neighbor similarity should NOT be used as the primary
+  unknown rejection score
+
+### Risk Levels
+
+| Risk Level | Meaning |
+|------------|---------|
+| `safe` | Normal classification, far from threshold |
+| `prototype_gallery_conflict` | Prototype class != gallery top1 class. Review recommended. |
+| `near_threshold_boundary` | Prototype similarity within 0.03 of threshold. Low confidence. |
+| `unsupported_class_no_training_data` | Classifier predicted an unsupported class with no training data. |
+
+## Current Version Limitations
+
+**This bundle is for internal testing, not final production.**
+
+1. **class_014 (shenggaozuofalan) is unsupported** — no training samples available.
+   The system cannot reliably identify this class. It will be detected as
+   `unsupported_known_class` with `risk_level = "unsupported_class_no_training_data"`.
+2. **Negative/unknown rejection is preliminary** — limited negative data means
+   threshold calibration is not fully validated.
+3. **Prototype similarity is the main OOD score** — do not use gallery similarity for rejection.
+4. **Gallery retrieval is evidence only** — provides similar samples for human review.
+5. **Deployment status: `limited_internal_prototype`** — requires more data before production use.
+
+### What happens with unsupported classes
+
+If the classifier predicts label 14 (shenggaozuofalan):
+- `final_type = "unsupported_known_class"`
+- `reason = "classifier_predicted_unsupported_known_class"`
+- `risk_level = "unsupported_class_no_training_data"`
+- The system cannot provide prototype or gallery evidence for this class
 
 ## Files
 
@@ -52,17 +112,21 @@ with prototype-based unknown/negative rejection.
 | `class_names.json` | Label-to-class-name mapping |
 | `config.yaml` | Model and inference configuration |
 | `version.json` | Bundle metadata |
+| `gallery.pt` | (Optional) Gallery embeddings for evidence retrieval |
+| `class_coverage_report.json` | (Optional) Class coverage validation |
+| `final_infer.py` | Final inference script |
 
 ## Usage
 
-### Single sample inference
+### Final Inference (recommended)
 
 ```bash
-python scripts/infer.py \\
+python final_infer.py \\
     --config config.yaml \\
     --checkpoint model.pt \\
     --prototypes prototypes.pt \\
     --threshold-json threshold.json \\
+    --gallery gallery.pt \\
     --input /path/to/sample.pcd
 ```
 
@@ -72,41 +136,56 @@ Input supports `.pcd` and `.npy` formats.
 
 ```json
 {
-    "final_type": "known|negative|unknown",
-    "final_label": "class_name|negative|unknown",
-    "reason": "matched_known_prototype|classified_as_negative|far_from_all_known_prototypes",
-    "classifier_pred": 5,
-    "classifier_confidence": 0.92,
-    "nearest_known_class": "class_name",
+  "final_type": "known|negative|unknown|unsupported_known_class",
+  "final_label": "class_name|negative|unknown",
+  "reason": "matched_known_prototype|classified_as_negative|far_from_known_prototypes|classifier_predicted_unsupported_known_class",
+  "risk_level": "safe|prototype_gallery_conflict|near_threshold_boundary|unsupported_class_no_training_data",
+
+  "classifier": {
+    "pred_label": 5,
+    "pred_class_name": "class_name",
+    "confidence": 0.92,
+    "top5": [...]
+  },
+
+  "prototype": {
+    "nearest_label": 5,
+    "nearest_class_name": "class_name",
     "nearest_similarity": 0.95,
-    "similarity_threshold": 0.91,
-    "top5_classifier_probs": [...],
-    "top5_prototype_similarities": [...]
+    "threshold": 0.91,
+    "top5": [...]
+  },
+
+  "gallery": {
+    "enabled": true,
+    "top1_label": 5,
+    "top1_class_name": "class_name",
+    "top1_similarity": 0.98,
+    "top5": [...]
+  }
 }
 ```
-
-## Decision Logic
-
-1. **Classifier prediction**: If classifier predicts label 19 → `"negative"`
-2. **Prototype similarity**: If nearest prototype similarity < threshold → `"unknown"`
-3. **Known class**: Otherwise → matched prototype's class
 
 ## Threshold Adjustment
 
 The threshold controls the tradeoff between:
 
-- **Higher threshold** (e.g., 0.94): More conservative, rejects more samples as unknown
-  - Lower known_accept_rate (~92%)
-  - Higher known classification accuracy on accepted samples
-  - Better at catching unknown/negative samples
-
+- **Higher threshold** (e.g., 0.94): More conservative, rejects more as unknown
 - **Lower threshold** (e.g., 0.85): More permissive, accepts more samples
-  - Higher known_accept_rate (~99%)
-  - May let some unknown/negative pass through
+
+**Recommended threshold: 0.90~0.91** (known_quantile P05 strategy)
 
 To adjust:
 1. Edit `threshold.json`: change `selected_threshold`
 2. Or pass `--threshold-json` with a different threshold file
+
+## Important Notes
+
+1. **Classifier negative is the first priority** — no prototype/gallery check needed
+2. **Prototype threshold is the primary OOD mechanism** — use this for unknown rejection
+3. **Gallery retrieval is auxiliary evidence only** — do not use for OOD rejection
+4. **If gallery top1 and prototype class disagree**, manual review is recommended
+5. **If a known class has no train samples**, the bundle is incomplete (check coverage report)
 
 ## Negative vs Unknown
 
@@ -114,6 +193,16 @@ To adjust:
   "other/negative" class seen during training.
 - **Unknown**: Sample doesn't match any known prototype well enough (similarity < threshold).
   Could be a new class never seen during training.
+
+## Deployment Checklist
+
+Before deploying this bundle:
+
+1. Run `check_class_coverage.py` to verify all known classes have train samples
+2. Verify threshold is set correctly for your risk tolerance
+3. Verify no known class is missing from prototypes
+4. If using gallery, verify it includes all known classes
+5. Test with representative samples from each class
 """
 
 
@@ -124,6 +213,12 @@ def main():
     parser.add_argument("--prototypes", type=str, default="outputs/prototypes/baseline_prototypes.pt")
     parser.add_argument("--threshold-json", type=str, default="outputs/prototypes/baseline_threshold_p05.json")
     parser.add_argument("--class-names", type=str, default="configs/class_names.json")
+    parser.add_argument("--gallery", type=str, default=None,
+                        help="Path to gallery.pt to include in bundle")
+    parser.add_argument("--coverage-report", type=str, default=None,
+                        help="Path to class_coverage_report.json to include in bundle")
+    parser.add_argument("--deployment-report", type=str, default=None,
+                        help="Path to limited_deployment_report.html to include in bundle")
     parser.add_argument("--output", type=str, default="outputs/deploy/pointnet_baseline_bundle")
     args = parser.parse_args()
 
@@ -160,8 +255,34 @@ def main():
     shutil.copy2(args.config, dest_config)
     print(f"  Copied: config.yaml")
 
+    # Optional: gallery
+    if args.gallery and os.path.exists(args.gallery):
+        dest_gallery = os.path.join(args.output, "gallery.pt")
+        shutil.copy2(args.gallery, dest_gallery)
+        print(f"  Copied: gallery.pt ({os.path.getsize(dest_gallery) / 1024:.1f} KB)")
+
+    # Optional: coverage report
+    if args.coverage_report and os.path.exists(args.coverage_report):
+        dest_coverage = os.path.join(args.output, "class_coverage_report.json")
+        shutil.copy2(args.coverage_report, dest_coverage)
+        print(f"  Copied: class_coverage_report.json")
+
+    # Optional: deployment report
+    if args.deployment_report and os.path.exists(args.deployment_report):
+        dest_dep = os.path.join(args.output, "limited_deployment_report.html")
+        shutil.copy2(args.deployment_report, dest_dep)
+        print(f"  Copied: limited_deployment_report.html")
+
+    # Copy final_infer.py reference
+    final_infer_src = os.path.join(os.path.dirname(__file__), "final_infer.py")
+    if os.path.exists(final_infer_src):
+        dest_infer = os.path.join(args.output, "final_infer.py")
+        shutil.copy2(final_infer_src, dest_infer)
+        print(f"  Copied: final_infer.py")
+
     # version.json
     git_commit = get_git_commit()
+    supported_cfg = cfg.get("supported_classes", {})
     version = {
         "created_at": datetime.now().isoformat(),
         "checkpoint": os.path.basename(args.checkpoint),
@@ -172,8 +293,11 @@ def main():
         "embedding_dim": cfg["embedding_dim"],
         "num_points": cfg["num_points"],
         "input_channels": cfg["input_channels"],
+        "supported_known_labels": supported_cfg.get("supported_known_labels", list(range(cfg["num_known_classes"]))),
+        "unsupported_known_labels": supported_cfg.get("unsupported_known_labels", []),
+        "incomplete_known_class_coverage": bool(supported_cfg.get("unsupported_known_labels", [])),
         "git_commit": git_commit,
-        "notes": "PointNet baseline with prototype-based unknown rejection",
+        "notes": "PointNet baseline with prototype-based unknown rejection (limited deployment)",
     }
     version_path = os.path.join(args.output, "version.json")
     with open(version_path, "w") as f:
@@ -190,6 +314,8 @@ def main():
     print(f"  Location: {args.output}")
     print(f"  Threshold: {threshold_data['selected_threshold']:.2f} ({threshold_data.get('selection_strategy', 'unknown')})")
     print(f"  Classes: {cfg['num_known_classes']} known + 1 negative")
+    if args.gallery and os.path.exists(args.gallery):
+        print(f"  Gallery: included")
     if git_commit:
         print(f"  Git commit: {git_commit}")
 

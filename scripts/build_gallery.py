@@ -72,6 +72,11 @@ def main():
     num_known_classes = cfg["num_known_classes"]
     negative_label = cfg["negative_label"]
 
+    # Supported / unsupported classes
+    supported_cfg = cfg.get("supported_classes", {})
+    supported_known_labels = set(supported_cfg.get("supported_known_labels", list(range(num_known_classes))))
+    unsupported_known_labels = supported_cfg.get("unsupported_known_labels", [])
+
     if args.output is None:
         ckpt_name = os.path.splitext(os.path.basename(args.checkpoint))[0]
         args.output = f"outputs/gallery/{ckpt_name}_{args.split}_gallery.pt"
@@ -113,13 +118,15 @@ def main():
 
     # Filter by class
     if not args.include_negative:
-        keep_mask = [l < num_known_classes for l in labels]
+        keep_mask = [l < num_known_classes and l in supported_known_labels for l in labels]
         n_negative = sum(1 for l in labels if l == negative_label)
+        n_unsupported = sum(1 for l in labels if l < num_known_classes and l not in supported_known_labels)
         n_removed = sum(1 for k in keep_mask if not k)
     else:
-        keep_mask = [True] * len(labels)
+        keep_mask = [l not in unsupported_known_labels or l >= num_known_classes for l in labels]
         n_negative = sum(1 for l in labels if l == negative_label)
-        n_removed = 0
+        n_unsupported = sum(1 for l in labels if l in unsupported_known_labels)
+        n_removed = sum(1 for k in keep_mask if not k)
 
     embeddings = embeddings[keep_mask]
     labels_filtered = [l for l, k in zip(labels, keep_mask) if k]
@@ -128,7 +135,9 @@ def main():
 
     print(f"  Gallery samples (known only): {len(labels_filtered)}")
     if n_removed > 0:
-        print(f"  Excluded {n_removed} negative samples")
+        print(f"  Excluded {n_removed} samples (negative + unsupported)")
+    if unsupported_known_labels:
+        print(f"  Unsupported classes excluded: {unsupported_known_labels}")
 
     # Class distribution
     class_counts = {}
@@ -153,6 +162,9 @@ def main():
         "split": args.split,
         "include_negative": args.include_negative,
         "created_at": datetime.now().isoformat(),
+        "supported_known_labels": sorted(supported_known_labels),
+        "unsupported_known_labels": unsupported_known_labels,
+        "incomplete_known_class_coverage": len(unsupported_known_labels) > 0,
     }
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)

@@ -427,6 +427,8 @@ table{width:100%;border-collapse:collapse;font-size:0.85rem}th{background:#f8f9f
 td{padding:8px 12px;border-bottom:1px solid var(--border)}tr:last-child td{border-bottom:none}tr:hover td{background:#f8f9fb}
 .img-section{margin-bottom:24px;background:var(--card-bg);border-radius:8px;border:1px solid var(--border);padding:16px;text-align:center}
 .img-section img{max-width:100%;height:auto}footer{margin-top:40px;text-align:center;color:var(--text2);font-size:0.8rem}
+.warning-banner{background:#fffbeb;border:2px solid #f59e0b;border-radius:10px;padding:16px 20px;margin-bottom:24px;font-size:0.9rem;line-height:1.6}
+.warning-banner strong{color:#92400e}
 """
 
     cards = ""
@@ -453,6 +455,7 @@ td{padding:8px 12px;border-bottom:1px solid var(--border)}tr:last-child td{borde
 <style>{CSS}</style></head><body><div class="container">
 <h1>Query-Gallery Retrieval Evaluation</h1>
 <p style="color:var(--text2);margin-bottom:24px">Generated at {html_mod.escape(ts)} | Split: {html_mod.escape(split)} | Threshold: {_f(threshold)}</p>
+<div class="warning-banner"><strong>Note:</strong> Gallery nearest-neighbor similarity is <strong>not recommended</strong> as the primary unknown rejection score. Use <strong>prototype similarity</strong> for OOD rejection, and use gallery retrieval for evidence / top-K similar samples.</div>
 <h2>Core Metrics</h2><div class="cards">{cards}</div>
 <h2>Per-class Metrics</h2>{pc_table}
 <h2>Visualizations</h2>

@@ -854,6 +854,221 @@ python scripts/export_inference_bundle.py \
 - **保守 threshold=0.85**: known_accept ≈ 99%, 但 negative_reject 下降
 - **激进 threshold=0.94**: known_accept ≈ 92%, 但分类准确率更高
 
+## 2.5 轮：统一推理决策逻辑与类别完整性检查
+
+统一最终推理逻辑为 classifier negative → prototype OOD rejection → known class → gallery evidence。增加类别完整性检查，确保部署前所有 known class 都有训练数据。
+
+### 1. 类别完整性检查
+
+```bash
+python scripts/check_class_coverage.py \
+  --dataset-root dataset \
+  --config configs/config.yaml \
+  --prototypes outputs/prototypes/baseline_prototypes.pt \
+  --gallery outputs/gallery/baseline_train_gallery.pt
+```
+
+检查内容：
+- config 中 `num_known_classes` 与 `class_names.json` 长度一致
+- `class_names.json` 的 key 覆盖所有 label
+- train/val/test 每个 known class 的样本数
+- prototypes 中每个 known class 是否存在
+- gallery 中每个 known class 是否存在
+- **无 train 样本的 known class 标记为 ERROR**（当前 class_014/shenggaozuofalan 无任何样本）
+
+输出：
+- `outputs/reports/class_coverage_report.json` — JSON 报告
+- `outputs/reports/class_coverage_report.html` — HTML 报告
+
+### 2. 最终推理逻辑（final_infer.py）
+
+```bash
+python scripts/final_infer.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --prototypes outputs/prototypes/baseline_prototypes.pt \
+  --threshold-json outputs/prototypes/baseline_threshold_p05.json \
+  --gallery outputs/gallery/baseline_train_gallery.pt \
+  --input path/to/sample.pcd
+```
+
+决策优先级：
+
+| 优先级 | 步骤 | 条件 | 结果 |
+|--------|------|------|------|
+| 1 | 分类头 negative | `pred == negative_label` | `"negative"` |
+| 2 | Prototype OOD rejection | `nearest_sim < threshold` | `"unknown"` |
+| 3 | Known class | 通过 prototype threshold | `"known"` (prototype class) |
+| 4 | Gallery evidence | 可选，不覆盖 final_label | top-K 相似样本 |
+
+**关键原则：**
+- classifier negative 是第一优先级
+- prototype threshold 是 unknown rejection 的主机制
+- gallery retrieval 只作为证据展示，**不作为主 OOD 判定**
+- 如果 gallery top1 class 与 prototype class 不一致 → `risk_level = "prototype_gallery_conflict"`
+- 如果 prototype_similarity - threshold < 0.03 → `risk_level = "near_threshold_boundary"`
+
+输出 JSON 包含三个完整模块：
+- `classifier`: 分类头预测、confidence、top-5
+- `prototype`: 最近 prototype 类别、similarity、threshold、top-5
+- `gallery`: top-1/top-5 相似样本（sample_id、label、similarity、source_path）
+
+### 3. Gallery 的正确用途
+
+- **用途**: 为已知样本提供相似样本检索和证据展示
+- **不应用于**: unknown/negative rejection（gallery similarity 对 negative 太宽松）
+- **原因**: retrieval-based nearest gallery similarity mean = 0.958，无法有效区分 known 和 negative
+- **推荐**: 使用 prototype similarity 做 OOD rejection，gallery 做证据展示
+
+### 4. Threshold 推荐
+
+| Threshold | known_accept | 特点 |
+|-----------|-------------|------|
+| 0.90 | ~97% | 推荐，balanced_score 最高 |
+| 0.91 | ~95% | P05 分位数，保守 |
+| 0.85 | ~99% | 宽松，可能放过 negative |
+| 0.94 | ~92% | 激进，会误拒部分 known |
+
+### 5. 当前 class_014 问题
+
+`class_014` (shenggaozuofalan) 在所有 split 中均无样本：
+- train: 0, val: 0, test: 0
+- prototypes 中不存在该 class 的 prototype
+- gallery 中不存在该 class 的 gallery entry
+- **这是一个数据缺失问题，不是模型问题**
+- **建议**: 补充 class_014 的训练数据后重新构建 prototypes 和 gallery
+
+### 6. 部署前检查清单
+
+1. 运行 `check_class_coverage.py` 确认无 ERROR
+2. 确认 threshold 设置正确（推荐 0.90~0.91）
+3. 确认 prototypes 包含所有 known class
+4. 如使用 gallery，确认 gallery 包含所有 known class
+5. 用各 class 的代表性样本测试 final_infer.py
+6. 确认 class_014 数据缺失是否可接受
+
+### 7. 更新的部署包导出
+
+```bash
+python scripts/export_inference_bundle.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --prototypes outputs/prototypes/baseline_prototypes.pt \
+  --threshold-json outputs/prototypes/baseline_threshold_p05.json \
+  --class-names configs/class_names.json \
+  --gallery outputs/gallery/baseline_train_gallery.pt \
+  --coverage-report outputs/reports/class_coverage_report.json \
+  --output outputs/deploy/pointnet_baseline_bundle
+```
+
+新增 bundle 文件：
+- `gallery.pt` — gallery embeddings（可选）
+- `class_coverage_report.json` — 类别完整性报告（可选）
+- `final_infer.py` — 最终推理脚本
+
+## 2.6-lite 轮：受限版本推理、评估与交付报告
+
+在暂时无法补充 class_014 和 negative 样本的情况下，完善受限版本的推理、评估和交付报告。
+
+### 为什么暂时不能称为完整 19 类模型
+
+- class_014 (shenggaozuofalan) 无任何训练数据，无法构建 prototype 或 gallery entry
+- negative 样本不足（train 仅 12 个），无法充分验证 OOD rejection
+- 当前只支持 **18 个 known class**，不是完整的 19 类
+
+### 配置 unsupported_known_labels
+
+在 `configs/config.yaml` 中新增：
+
+```yaml
+supported_classes:
+  enabled: true
+  supported_known_labels: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17, 18]
+  unsupported_known_labels: [14]
+  unsupported_policy: "return_unknown_with_warning"
+```
+
+影响：
+- `build_prototypes.py` 只为 supported class 构建 prototype
+- `build_gallery.py` 只把 supported class 放入 gallery
+- `final_infer.py` 如果 classifier 预测 unsupported class → `unsupported_known_class`
+
+### 1. 运行 pseudo-OOD 评估
+
+用已有 known 类模拟 unknown，评估 prototype OOD rejection 的能力：
+
+```bash
+python scripts/evaluate_pseudo_ood.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --split test \
+  --output-dir outputs/reports/pseudo_ood_eval
+```
+
+方法：Leave-One-Class-Out — 临时移除某个 known class 的 prototype，将该 class 的 test 样本当作 pseudo-unknown。
+
+输出：
+- `pseudo_ood_metrics.json` — 总体和每类指标
+- `per_class_pseudo_ood.csv` — 每类详细结果
+- `pseudo_ood_reject_rate_bar.png` — 拒绝率柱状图
+- `pseudo_ood_similarity_heatmap.png` — 相似度热力图
+- `report.html` — 完整 HTML 报告
+
+### 2. 生成 limited deployment report
+
+```bash
+python scripts/generate_limited_deployment_report.py \
+  --class-coverage outputs/reports/class_coverage_report.json \
+  --ood outputs/reports/ood_eval_baseline_test_p05/ood_metrics.json \
+  --retrieval outputs/reports/retrieval_eval_baseline_test/retrieval_metrics.json \
+  --pseudo-ood outputs/reports/pseudo_ood_eval/pseudo_ood_metrics.json \
+  --threshold outputs/prototypes/baseline_threshold_p05.json \
+  --output-dir outputs/reports/limited_deployment
+```
+
+报告包含：
+- 当前支持范围（18 supported + 1 unsupported）
+- 不支持范围（class_014 无法可靠识别）
+- 关键指标（OOD、retrieval、pseudo-OOD）
+- 推荐推理逻辑
+- 交付结论：**limited_internal_prototype**（不是 production ready）
+- 下一步必须补充的数据
+
+### 3. 导出受限部署包
+
+```bash
+python scripts/export_inference_bundle.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --prototypes outputs/prototypes/baseline_prototypes.pt \
+  --threshold-json outputs/prototypes/baseline_threshold_p05.json \
+  --class-names configs/class_names.json \
+  --gallery outputs/gallery/baseline_train_gallery.pt \
+  --coverage-report outputs/reports/class_coverage_report.json \
+  --deployment-report outputs/reports/limited_deployment/limited_deployment_report.html \
+  --output outputs/deploy/pointnet_baseline_bundle
+```
+
+### 4. 当前 supported / unsupported 类
+
+| 类别 | 标签 | 状态 |
+|------|------|------|
+| 18 个 known class | 0-13, 15-18 | **supported** |
+| shenggaozuofalan | 14 | **unsupported**（无训练数据） |
+| qita (negative) | 19 | limited evaluation |
+
+### 5. 后续补数据后如何升级为完整版本
+
+1. 补充 class_014 训练数据到 `dataset/train/class_014/`
+2. 运行 `rebuild_split.py` 重新划分
+3. 重新训练模型（或使用当前模型 fine-tune）
+4. 重建 prototypes：`python scripts/build_prototypes.py`
+5. 重建 gallery：`python scripts/build_gallery.py`
+6. 重新搜索 threshold：`python scripts/search_threshold.py`
+7. 运行完整评估链
+8. 从 `config.yaml` 移除 `unsupported_known_labels: [14]`
+9. 导出完整部署包
+
 ## 训练（baseline）
 
 ```bash
