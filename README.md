@@ -630,6 +630,230 @@ ood:
 - **AUROC**：如果可计算，> 0.9 表示 embedding 空间能有效区分 known/negative
 - **相似度分布直方图**：查看 known 和 negative 的 nearest similarity 是否有明显分离
 
+## 2.3 轮：改进 Prototype/OOD Threshold 搜索和评估
+
+在 2.2 基础上，改进 threshold 搜索策略、增加多阈值评估、相似度分位数报告和风险分析。
+
+### Threshold 搜索策略
+
+支持 4 种策略（通过 `config.yaml` 的 `ood.threshold_selection` 配置）：
+
+| 策略 | 说明 |
+|------|------|
+| `known_quantile` | 使用 val known similarity 的分位数作为 threshold |
+| `max_negative_rejection_under_known_accept_constraint` | 在 known_accept >= target 的 threshold 中选 negative_reject 最高的 |
+| `best_balanced_score` | 选 known_accept + negative_reject 最大的 |
+| `manual` | 直接使用 `ood.similarity_threshold` |
+
+### 当前 negative 很少时的推荐
+
+当 negative 样本不足时（如当前只有 3 个 test negative），不应只依赖 `negative_reject_rate`。推荐使用 `known_quantile`：
+
+| 分位数 | 含义 | 适用场景 |
+|--------|------|----------|
+| `p05` | 保留 ~95% known | 业务更怕误收 unknown |
+| `p01` | 保留 ~99% known | 业务更怕误拒 known |
+| `p10` | 保留 ~90% known | 对 known 接受率要求不高 |
+
+### 配置
+
+```yaml
+ood:
+  threshold_selection: "known_quantile"
+  known_quantile: 0.05
+  candidate_thresholds: [0.68, 0.75, 0.80, 0.85, 0.90, 0.92, 0.94, 0.96]
+  min_known_accept_rate: 0.95
+```
+
+### 1. 运行 known_quantile threshold 搜索
+
+```bash
+python scripts/search_threshold.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --prototypes outputs/prototypes/baseline_prototypes.pt \
+  --split val \
+  --output outputs/prototypes/baseline_threshold_p05.json
+```
+
+输出 JSON 包含：
+- `selected_threshold`：选定的 threshold
+- `selection_strategy`：使用的策略名
+- `known_similarity_quantiles`：known 样本的 p01/p05/p10/p50/p90/p95/p99
+- `negative_similarity_quantiles`：negative 样本分位数（如果有）
+- `candidate_threshold_results`：候选 threshold 的指标对比
+- `threshold_curve`：全范围搜索曲线
+- `warnings`：negative 样本不足时的提醒
+
+### 2. 运行多 threshold sweep 评估
+
+```bash
+python scripts/evaluate_ood.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --prototypes outputs/prototypes/baseline_prototypes.pt \
+  --threshold-json outputs/prototypes/baseline_threshold_p05.json \
+  --split test \
+  --output-dir outputs/reports/ood_eval_baseline_test_p05 \
+  --thresholds 0.68,0.75,0.80,0.85,0.90,0.92,0.94,0.96
+```
+
+输出额外文件：
+- `threshold_sweep_metrics.csv` — 每个 threshold 的完整指标
+- `threshold_sweep_metrics.json` — JSON 格式
+- `threshold_sweep_report.html` — 可视化对比报告（高亮推荐/best/balanced）
+- `threshold_sweep_plot.png` — sweep 曲线图
+
+### 3. 风险分析输出
+
+每个评估都会输出：
+
+| 文件 | 内容 |
+|------|------|
+| `per_sample_predictions.csv` | 增加 `nearest_similarity`, `margin_to_threshold`, `risk_level` |
+| `hard_negative_samples.csv` | 所有 negative 但被误判为 known 的样本 |
+| `near_boundary_known_samples.csv` | margin 最小的前 50 个 known 样本 |
+
+风险等级规则：
+
+| 风险等级 | 条件 |
+|----------|------|
+| `safe_known` | known 样本，margin >= 0.03 |
+| `near_boundary_known` | known 样本，0 <= margin < 0.03 |
+| `rejected_known` | known 样本，similarity < threshold |
+| `safe_rejected_negative` | negative 样本，margin <= -0.03 |
+| `near_boundary_negative` | negative 样本，-0.03 < margin < 0 |
+| `false_known_negative` | negative 样本，similarity >= threshold |
+
+### 4. 改进的图表
+
+- **threshold_curve.png**：增加 known_reject_rate、false_known_rate、P05 线、manual threshold 线
+- **nearest_similarity_histogram.png**：增加 threshold 竖线
+- **report.html**：增加相似度分位数卡片
+
+### 如何选择最终 threshold
+
+1. 先看 `known_similarity_quantiles`：p05 ~0.94，p01 ~0.93
+2. 如果业务更怕误拒 known → 用 p01（~0.93），保证 99% known 被接受
+3. 如果业务更怕误收 unknown → 用 p05（~0.94），只保证 95% known
+4. 用 `--thresholds` sweep 对比不同 threshold 在 test 上的实际表现
+5. 重点关注 `known_accept_rate` 和 `known_classification_accuracy_after_accept`
+
+## 2.4 轮：Query-Gallery Retrieval 评估与部署包导出
+
+在 prototype/OOD 基础上，增加更接近实际部署的 query-gallery retrieval 评估，并导出可部署的 inference bundle。
+
+### 1. 构建 Gallery
+
+从 train split 提取 embedding 构建检索库：
+
+```bash
+python scripts/build_gallery.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --split train \
+  --output outputs/gallery/baseline_train_gallery.pt
+```
+
+输出 `baseline_train_gallery.pt` 包含：
+- `embeddings`: Tensor [N, 256]，L2-normalized
+- `labels`: Tensor [N]
+- `class_names`, `sample_ids`, `source_paths`
+- 默认只包含 known classes，排除 negative
+- 加 `--include-negative` 可包含 negative
+
+### 2. Query-Gallery Retrieval 评估
+
+```bash
+python scripts/evaluate_retrieval.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --gallery outputs/gallery/baseline_train_gallery.pt \
+  --threshold-json outputs/prototypes/baseline_threshold_p05.json \
+  --split test \
+  --output-dir outputs/reports/retrieval_eval_baseline_test
+```
+
+评估逻辑：对每个 query 样本，计算与 gallery 所有样本的 cosine similarity，找 top-K 最近邻。如果最近邻 similarity < threshold → "unknown"，否则使用最近邻的类别。
+
+输出指标：
+
+| 指标 | 含义 |
+|------|------|
+| known_accept_rate | known query 被 gallery 接受的比例 |
+| top1_accuracy_on_accepted | 被接受的 known query 中 top-1 正确的比例 |
+| recall@K / precision@K | top-K 检索指标 |
+| negative_reject_rate | negative query 被拒绝的比例 |
+| final_accuracy_with_unknown | 综合准确率（含 unknown 判定） |
+| AUROC | known/negative 区分度 |
+
+输出文件：
+- `retrieval_metrics.json` — 全部指标
+- `per_sample_retrieval.csv` — 每个 query 的检索详情（含 top1/top5 邻居信息）
+- `per_class_retrieval_metrics.csv` — 每类指标
+- `topk_metrics.csv` — Recall@K / Precision@K
+- `nearest_similarity_histogram.png` — 相似度分布
+- `retrieval_confusion_matrix.png` — 检索混淆矩阵
+- `report.html` — 完整 HTML 报告
+
+### 3. 多阈值 Sweep
+
+```bash
+python scripts/evaluate_retrieval.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --gallery outputs/gallery/baseline_train_gallery.pt \
+  --threshold-json outputs/prototypes/baseline_threshold_p05.json \
+  --split test \
+  --output-dir outputs/reports/retrieval_eval_baseline_test \
+  --thresholds 0.85,0.90,0.91,0.92,0.94
+```
+
+输出额外文件：
+- `threshold_sweep_retrieval.csv` — 每个 threshold 的指标
+- `threshold_sweep_retrieval.html` — 可视化对比报告（高亮推荐/best/balanced）
+
+### 4. 导出部署包
+
+```bash
+python scripts/export_inference_bundle.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --prototypes outputs/prototypes/baseline_prototypes.pt \
+  --threshold-json outputs/prototypes/baseline_threshold_p05.json \
+  --class-names configs/class_names.json \
+  --output outputs/deploy/pointnet_baseline_bundle
+```
+
+输出目录：
+- `model.pt` — 模型 checkpoint
+- `prototypes.pt` — 类别 prototype
+- `threshold.json` — threshold 配置
+- `class_names.json` — 类别名称映射
+- `config.yaml` — 模型配置
+- `version.json` — 版本信息（含 git commit、创建时间）
+- `README_INFERENCE.md` — 推理使用说明
+
+### 5. 风险分析
+
+`per_sample_retrieval.csv` 中包含 `risk_level` 字段：
+
+| 风险等级 | 含义 |
+|----------|------|
+| `safe` | 正确判定，离 threshold 较远 |
+| `near_boundary` | 距 threshold 在 0.03 以内 |
+| `rejected_known` | known query 被误判为 unknown |
+| `misclassified_known` | known query 被接受但 top1 错误 |
+| `false_known_negative` | negative query 被误判为 known |
+
+### Threshold 使用建议
+
+基于当前数据（threshold 0.90~0.91）：
+
+- **推荐 threshold=0.90**: known_accept ≈ 97%, negative_reject = 100%, balanced_score 最高
+- **保守 threshold=0.85**: known_accept ≈ 99%, 但 negative_reject 下降
+- **激进 threshold=0.94**: known_accept ≈ 92%, 但分类准确率更高
+
 ## 训练（baseline）
 
 ```bash

@@ -89,6 +89,9 @@ _DEFAULT_CONFIG = {
         "threshold_max": 0.99,
         "threshold_step": 0.01,
         "target_known_accept_rate": 0.95,
-        "threshold_selection": "max_negative_rejection_under_known_accept_constraint",
+        "threshold_selection": "known_quantile",
+        "known_quantile": 0.05,
+        "candidate_thresholds": [0.68, 0.75, 0.80, 0.85, 0.90, 0.92, 0.94, 0.96],
+        "min_known_accept_rate": 0.95,
     },
 }
