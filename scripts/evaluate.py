@@ -1,8 +1,10 @@
 import argparse
+import csv
 import json
 import os
 import sys
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -10,7 +12,11 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.datasets.pointcloud_dataset import PointCloudDataset
-from src.metrics.classification_metrics import compute_metrics, plot_confusion_matrix
+from src.metrics.classification_metrics import (
+    compute_metrics,
+    plot_confusion_matrix,
+    plot_normalized_confusion_matrix,
+)
 from src.models.metric_model import MetricPointNet
 from src.utils.checkpoint import load_checkpoint
 from src.utils.config import load_config
@@ -44,6 +50,33 @@ def run_evaluation(model, loader, device, num_known_classes, negative_label):
     return metrics, all_labels, all_preds
 
 
+def load_class_names(config_path, num_classes):
+    class_names_path = os.path.join(os.path.dirname(config_path), "class_names.json")
+    if os.path.exists(class_names_path):
+        with open(class_names_path) as f:
+            name_map = json.load(f)
+        return [name_map.get(str(i), f"class_{i:03d}") for i in range(num_classes)]
+    return [f"class_{i:03d}" for i in range(num_classes)]
+
+
+def save_per_class_csv(metrics, class_names, num_classes, save_path, split):
+    """Save per-class metrics as CSV."""
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    pc = metrics.get("per_class", {})
+
+    with open(save_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["class_name", "label", "split", "precision", "recall", "f1", "support"])
+        for i in range(num_classes):
+            name = class_names[i] if i < len(class_names) else f"class_{i:03d}"
+            entry = pc.get(str(i), {})
+            support = entry.get("support", 0)
+            prec = entry.get("precision", 0)
+            rec = entry.get("recall", 0)
+            f1 = entry.get("f1", 0)
+            writer.writerow([name, i, split, f"{prec:.4f}", f"{rec:.4f}", f"{f1:.4f}", support])
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate PointNet model")
     parser.add_argument("--config", type=str, default="configs/config.yaml")
@@ -54,6 +87,10 @@ def main():
     cfg = load_config(args.config)
     device = torch.device(cfg["device"] if torch.cuda.is_available() else "cpu")
 
+    num_classes = cfg["num_classes"]
+    num_known_classes = cfg["num_known_classes"]
+    negative_label = cfg["negative_label"]
+
     dataset = PointCloudDataset(
         root_dir=cfg["data"]["root"],
         split=args.split,
@@ -61,38 +98,75 @@ def main():
         input_channels=cfg["input_channels"],
         augmentation_config={},
     )
+
+    if len(dataset) == 0:
+        print(f"[ERROR] No samples found in {args.split} split")
+        sys.exit(1)
+
     loader = DataLoader(dataset, batch_size=cfg["train"]["batch_size"], shuffle=False, num_workers=4, collate_fn=collate_fn)
 
     model = MetricPointNet(
         input_channels=cfg["input_channels"],
-        num_classes=cfg["num_classes"],
+        num_classes=num_classes,
         embedding_dim=cfg["embedding_dim"],
     ).to(device)
     load_checkpoint(args.checkpoint, model)
 
-    metrics, y_true, y_pred = run_evaluation(model, loader, device, cfg["num_known_classes"], cfg["negative_label"])
+    metrics, y_true, y_pred = run_evaluation(model, loader, device, num_known_classes, negative_label)
 
     os.makedirs("outputs/reports", exist_ok=True)
 
+    # Save metrics JSON
     with open("outputs/reports/evaluation.json", "w") as f:
         json.dump(metrics, f, indent=2, ensure_ascii=False)
     print(f"Metrics saved to outputs/reports/evaluation.json")
 
-    class_names_path = os.path.join(os.path.dirname(args.config), "class_names.json")
-    if os.path.exists(class_names_path):
-        with open(class_names_path) as f:
-            name_map = json.load(f)
-        class_names = [name_map[str(i)] for i in range(cfg["num_classes"])]
-    else:
-        class_names = [f"class_{i:03d}" for i in range(cfg["num_known_classes"])] + ["negative"]
+    # Class names
+    class_names = load_class_names(args.config, num_classes)
 
+    # Confusion matrix
     plot_confusion_matrix(y_true, y_pred, class_names, "outputs/reports/confusion_matrix.png")
     print("Confusion matrix saved to outputs/reports/confusion_matrix.png")
 
-    print(f"\nOverall Accuracy: {metrics['overall_accuracy']:.4f}")
+    # Normalized confusion matrix
+    plot_normalized_confusion_matrix(y_true, y_pred, class_names, "outputs/reports/confusion_matrix_normalized.png")
+    print("Normalized confusion matrix saved to outputs/reports/confusion_matrix_normalized.png")
+
+    # Per-class CSV
+    save_per_class_csv(metrics, class_names, num_classes, "outputs/reports/per_class_metrics.csv", args.split)
+    print("Per-class metrics saved to outputs/reports/per_class_metrics.csv")
+
+    # Check for missing classes in this split
+    present_labels = set(y_true)
+    missing_classes = []
+    for i in range(num_classes):
+        if i not in present_labels:
+            name = class_names[i] if i < len(class_names) else f"class_{i:03d}"
+            missing_classes.append(name)
+    if missing_classes:
+        print(f"\n[WARN] Classes not present in {args.split}: {missing_classes}")
+
+    # Print summary
+    print(f"\n{'='*50}")
+    print(f"Evaluation Results ({args.split})")
+    print(f"{'='*50}")
+    print(f"Samples: {len(y_true)}")
+    print(f"Overall Accuracy: {metrics['overall_accuracy']:.4f}")
     print(f"Known-class Accuracy: {metrics['known_class_accuracy']:.4f}")
     print(f"Negative Accuracy: {metrics['negative_accuracy']:.4f}")
+    print(f"Macro Precision: {metrics['macro_precision']:.4f}")
+    print(f"Macro Recall: {metrics['macro_recall']:.4f}")
     print(f"Macro F1: {metrics['macro_f1']:.4f}")
+
+    print(f"\n--- Per-Class ---")
+    for i in range(num_classes):
+        name = class_names[i] if i < len(class_names) else f"class_{i:03d}"
+        entry = metrics.get("per_class", {}).get(str(i), {})
+        support = entry.get("support", 0)
+        prec = entry.get("precision", 0)
+        rec = entry.get("recall", 0)
+        f1 = entry.get("f1", 0)
+        print(f"  {name:<30s} P={prec:.3f}  R={rec:.3f}  F1={f1:.3f}  support={support}")
 
 
 if __name__ == "__main__":

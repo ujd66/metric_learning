@@ -37,20 +37,20 @@ raw_pcd_dataset/
     ...
 ```
 
-每个 PCD 样本目录可包含伴随文件（`xxx_heightmap.png`, `xxx_info.txt`, `xxx_transform.json`），转换时会自动记录路径。
+每个 PCD 样本目录可包含伴随文件（`xxx_crop.png`, `xxx_meta.json`），转换时会自动记录路径。
 
 运行转换：
 
 ```bash
 python scripts/prepare_pcd_dataset.py \
-  --input_dir raw_pcd_dataset \
-  --output_dir dataset \
+  --input-dir raw_pcd_dataset \
+  --output-dir dataset \
   --splits train val test
 
 # 如需包含 intensity 通道 (xyz + intensity -> 4 channels)：
 python scripts/prepare_pcd_dataset.py \
-  --input_dir raw_pcd_dataset \
-  --output_dir dataset \
+  --input-dir raw_pcd_dataset \
+  --output-dir dataset \
   --use_intensity
 ```
 
@@ -100,9 +100,211 @@ dataset/
 python scripts/inspect_pcd_sample.py --input raw_pcd_dataset/train/class_000/000003.pcd
 ```
 
+## 推荐数据流程
+
+### 1. PCD 检查
+
+确认 PCD 文件能正常读取，点数、坐标范围合理：
+
+```bash
+python scripts/inspect_pcd_sample.py --input label/cewenqi/000018/000018_0001_crop.pcd
+```
+
+### 2. 生成统一数据池（dataset_all）
+
+将所有 PCD 转成 NPY 格式到一个统一目录，不做 split。自动将 negative 类（qita/other 等）映射到 `negative/` 目录。
+
+```bash
+python scripts/prepare_pcd_dataset.py \
+  --flat \
+  --input-root raw_pcd_dataset \
+  --output-root dataset_all \
+  --config configs/config.yaml
+```
+
+输出结构：
+
+```
+dataset_all/
+  class_000/
+  class_001/
+  ...
+  class_018/
+  negative/
+```
+
+### 3. 重新分层划分（train/val/test）
+
+用 `rebuild_split.py` 自动按类别分层划分，确保每个类别都进入 train/val/test：
+
+```bash
+python scripts/rebuild_split.py \
+  --input-root dataset_all \
+  --output-root dataset \
+  --config configs/config.yaml \
+  --train-ratio 0.7 \
+  --val-ratio 0.15 \
+  --test-ratio 0.15 \
+  --seed 42
+```
+
+划分策略：
+- 样本充足的类别：按比例划分
+- count >= 3：至少 train 1, val 1, test 1
+- count == 2：train 1, val 1（warning）
+- count == 1：仅 train（warning）
+- **不会复制样本到 val/test**，避免数据泄漏
+
+### 4. 验证数据划分
+
+```bash
+python scripts/validate_dataset.py \
+  --dataset-root dataset \
+  --config configs/config.yaml
+```
+
+输出：
+- 每个 split 的总样本数
+- 每个类别在 train/val/test 的样本数
+- negative 类是否存在
+- 缺失类别
+- 类别不均衡比例
+- 样本过少警告
+
+报告保存到 `outputs/reports/dataset_validation.json`。
+
+### 5. 训练
+
+```bash
+python scripts/train.py --config configs/config.yaml
+```
+
+### 两种数据划分方式
+
+| 方式 | 命令 | 适用场景 |
+|------|------|----------|
+| **自动划分**（推荐） | `prepare_pcd_dataset.py --flat` + `rebuild_split.py` | 从原始数据开始，需要确保每类都有 val/test |
+| **手动 mapping** | 按 `sample_mapping.json` 复制到 `raw_pcd_dataset/` | 已有固定划分方案 |
+
 ## 配置
 
 编辑 `configs/config.yaml` 修改超参数。编辑 `configs/class_names.json` 修改类别名称。
+
+### 类别映射
+
+`config.yaml` 中的 `label_mapping` 控制哪些类被视为 negative：
+
+```yaml
+label_mapping:
+  negative_names: ["negative", "qita", "other", "others", "其他"]
+  force_negative_label: 19
+```
+
+- 如果原始数据的类名匹配 `negative_names`，自动映射到 label 19
+- 输出目录统一为 `negative/`
+- 标签编号：0-18 为 19 个 known class，19 为 negative
+
+### 类别权重
+
+训练时可启用 class_weight 来应对不均衡：
+
+```yaml
+train:
+  use_class_weight: true
+  class_weight_max: 10.0
+```
+
+权重按逆频率计算并 clip 到 `[1.0, class_weight_max]`，防止极小类权重爆炸。
+
+## Baseline 诊断流程
+
+在引入 metric learning 之前，需要确认 CrossEntropy baseline 能在真实数据上正常学习。推荐流程：
+
+### 1. 验证数据集
+
+```bash
+python scripts/validate_dataset.py \
+  --dataset-root dataset \
+  --config configs/config.yaml
+```
+
+检查类别覆盖、不均衡、metric learning suitability。
+
+### 2. 过拟合小实验
+
+用 32 个样本验证模型能正常收敛：
+
+```bash
+python scripts/train.py \
+  --config configs/config.yaml \
+  --overfit-small-batch
+```
+
+- 如果 acc 接近 100%：PASS，代码和数据基本正常
+- 如果 acc > 50% 但不到 100%：PARTIAL，检查 lr / augmentation
+- 如果 acc < 50%：FAIL，检查标签、预处理、模型代码
+
+### 3. 完整训练
+
+```bash
+python scripts/train.py --config configs/config.yaml
+```
+
+每个 epoch 输出：
+- Train Loss / Train Acc
+- Val Loss / Val Acc
+- Val Macro Precision / Recall / F1
+- Val Known-class Accuracy
+- Val Negative Accuracy（无 negative 时显示 N/A）
+- Learning Rate
+
+训练曲线保存到 `outputs/reports/training_curves.png`。
+
+### 4. 评价
+
+```bash
+python scripts/evaluate.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --split test
+```
+
+输出文件：
+- `outputs/reports/evaluation.json` — 全部指标
+- `outputs/reports/confusion_matrix.png` — 混淆矩阵
+- `outputs/reports/confusion_matrix_normalized.png` — 归一化混淆矩阵
+- `outputs/reports/per_class_metrics.csv` — 每类指标
+
+### 5. Embedding 可视化
+
+```bash
+python scripts/visualize_embeddings.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --split test
+```
+
+输出：
+- `outputs/reports/embedding_tsne_test.png` — t-SNE 可视化
+- `outputs/reports/embedding_features.npy` — embedding 向量
+- `outputs/reports/embedding_labels.npy` — 对应标签
+
+### 判断 baseline 是否正常
+
+| 指标 | 正常范围 | 异常信号 |
+|------|----------|----------|
+| Overfit small batch acc | > 90% | < 50% 说明代码/标签有问题 |
+| Val macro F1 | > 0.3（20 类不均衡） | 始终 < 0.1 |
+| Train loss | 持续下降 | 不下降或 NaN |
+| Val loss | 先降后稳 | 一直上升（严重过拟合） |
+| t-SNE 可视化 | 同类有一定聚集 | 完全随机分布 |
+
+### 满足什么条件可以进入 metric learning
+
+1. Overfit small batch 能到 90%+
+2. 完整训练 val macro F1 合理（至少 > 0.2）
+3. t-SNE 显示同类有一定聚集趋势
+4. 没有训练异常（loss NaN、acc 不动等）
 
 ## 训练
 
@@ -112,13 +314,21 @@ python scripts/train.py --config configs/config.yaml
 
 训练日志输出到 `outputs/logs/train.log`，checkpoint 保存到 `outputs/checkpoints/`。
 
+输出文件：
+- `outputs/reports/training_curves.png` — 训练曲线
+- `outputs/reports/training_history.json` — 每 epoch 指标
+- `outputs/reports/best_val_per_class_metrics.json` — best checkpoint 的每类指标
+
 ## 评价
 
 ```bash
-python scripts/evaluate.py --config configs/config.yaml --checkpoint outputs/checkpoints/best.pt --split test
+python scripts/evaluate.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --split test
 ```
 
-结果保存到 `outputs/reports/evaluation.json` 和 `outputs/reports/confusion_matrix.png`。
+结果保存到 `outputs/reports/evaluation.json`、`outputs/reports/confusion_matrix.png`、`outputs/reports/confusion_matrix_normalized.png` 和 `outputs/reports/per_class_metrics.csv`。
 
 ## 推理
 

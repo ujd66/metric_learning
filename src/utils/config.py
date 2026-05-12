@@ -16,6 +16,10 @@ _DEFAULT_CONFIG = {
     "negative_label": 19,
     "num_classes": 20,
     "embedding_dim": 256,
+    "label_mapping": {
+        "negative_names": ["negative", "qita", "other", "others", "其他"],
+        "force_negative_label": 19,
+    },
     "data": {
         "root": "./dataset",
         "train_split": "train",
@@ -36,6 +40,8 @@ _DEFAULT_CONFIG = {
         "lr": 0.001,
         "weight_decay": 0.0001,
         "optimizer": "adamw",
+        "use_class_weight": True,
+        "class_weight_max": 10.0,
     },
 }
 

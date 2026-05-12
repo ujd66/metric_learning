@@ -17,7 +17,9 @@ from src.utils.pointcloud_ops import (
 _SUPPORTED_EXTS = (".npy", ".pcd")
 
 
-def _parse_label_from_dirname(dirname):
+def _parse_label_from_dirname(dirname, negative_label=19):
+    if dirname == "negative":
+        return negative_label
     m = re.match(r"class_(\d+)", dirname)
     if m:
         return int(m.group(1))

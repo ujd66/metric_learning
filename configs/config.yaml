@@ -2,11 +2,15 @@ seed: 42
 device: "cuda"
 num_points: 2048
 input_channels: 3
-num_known_classes: 20
-use_negative_class: false
-negative_label: -1
+num_known_classes: 19
+use_negative_class: true
+negative_label: 19
 num_classes: 20
 embedding_dim: 256
+
+label_mapping:
+  negative_names: ["negative", "qita", "other", "others", "其他"]
+  force_negative_label: 19
 
 data:
   root: "./dataset"
@@ -32,3 +36,5 @@ train:
   lr: 0.001
   weight_decay: 0.0001
   optimizer: "adamw"
+  use_class_weight: true
+  class_weight_max: 10.0

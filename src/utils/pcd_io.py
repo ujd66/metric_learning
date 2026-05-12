@@ -51,11 +51,16 @@ def read_pcd_with_intensity(path):
 def get_pcd_info(path):
     """Read companion files for a PCD sample.
 
-    Given 000003.pcd, looks for 000003_info.txt, 000003_transform.json,
-    and 000003_heightmap.png in the same directory.
+    Supports two naming conventions:
+    - Legacy: {base}_heightmap.png, {base}_info.txt, {base}_transform.json
+    - Label:  {base}.png, {base}_meta.json
     """
     base = os.path.splitext(os.path.basename(path))[0]
     directory = os.path.dirname(path)
+
+    # For *_crop.pcd files, the meta.json uses the stem without "_crop"
+    # e.g. 000029_0001_crop.pcd -> 000029_0001_meta.json
+    stem = base.removesuffix("_crop")
 
     info = {
         "pcd_path": path,
@@ -66,21 +71,28 @@ def get_pcd_info(path):
         "transform": None,
     }
 
-    heightmap = os.path.join(directory, f"{base}_heightmap.png")
-    if os.path.exists(heightmap):
-        info["heightmap_path"] = heightmap
+    # heightmap / image: legacy, same-base png, stem png
+    for candidate in (f"{base}_heightmap.png", f"{base}.png", f"{stem}.png"):
+        p = os.path.join(directory, candidate)
+        if os.path.exists(p):
+            info["heightmap_path"] = p
+            break
 
+    # info text
     info_file = os.path.join(directory, f"{base}_info.txt")
     if os.path.exists(info_file):
         info["info_path"] = info_file
         with open(info_file) as f:
             info["info_text"] = f.read().strip()
 
-    transform_file = os.path.join(directory, f"{base}_transform.json")
-    if os.path.exists(transform_file):
-        info["transform_path"] = transform_file
-        with open(transform_file) as f:
-            info["transform"] = json.load(f)
+    # transform / meta json: legacy, base meta, stem meta
+    for candidate in (f"{base}_transform.json", f"{base}_meta.json", f"{stem}_meta.json"):
+        p = os.path.join(directory, candidate)
+        if os.path.exists(p):
+            info["transform_path"] = p
+            with open(p) as f:
+                info["transform"] = json.load(f)
+            break
 
     return info
 

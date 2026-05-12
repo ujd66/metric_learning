@@ -20,21 +20,25 @@ build/
 .DS_Store
 Thumbs.db
 
-# Model outputs (keep .gitkeep)
-outputs/checkpoints/*
+# Dataset files (large binary data)
+dataset/
+!dataset/.gitkeep
+dataset_all/
+raw_pcd_dataset/
+
+# Label source
+label/
+label.zip
+
+# Outputs
+outputs/
+!outputs/.gitkeep
 !outputs/checkpoints/.gitkeep
-outputs/logs/*
 !outputs/logs/.gitkeep
-outputs/reports/*
 !outputs/reports/.gitkeep
 
-# Dataset files (large binary data)
-dataset/train/
-dataset/val/
-dataset/test/
-dataset/label/
-dataset/label.zip
+# Jupyter
+.ipynb_checkpoints/
 
-raw_pcd_dataset/train/
-raw_pcd_dataset/val/
-raw_pcd_dataset/test/
+# Claude Code
+.claude/
