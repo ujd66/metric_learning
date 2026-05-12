@@ -485,6 +485,151 @@ evaluate_embeddings.py 会输出这些类别对的详细分析：
 5. Negative accuracy 不明显恶化
 6. 训练稳定，无 NaN
 
+## 2.2 轮：Prototype 构建与 OOD / Unknown Rejection
+
+基于已训练模型的 embedding 构建 19 个 known class 的 prototype，支持推理时根据 prototype similarity 做 unknown rejection。
+
+**当前使用 baseline checkpoint（不是 CE+SupCon），因为 baseline embedding 质量更好。**
+
+### 数据限制说明
+
+> **重要：当前 negative 样本非常少，因此：**
+> - negative accuracy 不稳定
+> - negative_reject_rate 不稳定
+> - threshold 对 negative 的校准不可靠
+> - unknown rejection 更适合看 known_accept_rate 和 nearest_similarity 分布
+> - 后续应补充更多 negative / unknown 样本
+
+### 1. 构建 Prototypes
+
+从 train split 提取 embedding，为每个 known class 计算均值 prototype：
+
+```bash
+python scripts/build_prototypes.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --split train \
+  --output outputs/prototypes/baseline_prototypes.pt
+```
+
+输出 `baseline_prototypes.pt` 包含：
+- `prototypes`: Tensor [19, 256]，每个 known class 的 L2-normalized prototype
+- `class_names`: 19 个类别名称
+- `class_support`: 每个类别的样本数
+- 不包含 negative 类的 prototype
+
+### 2. 搜索 Similarity Threshold
+
+在 val split 上搜索最优 similarity threshold：
+
+```bash
+python scripts/search_threshold.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --prototypes outputs/prototypes/baseline_prototypes.pt \
+  --split val \
+  --output outputs/prototypes/baseline_threshold.json
+```
+
+搜索策略：
+- 默认选择 `known_accept_rate >= 0.95` 的 threshold 中，`negative_reject_rate` 最高的
+- 如果 val 中没有 negative 样本，选择保证 95% known 被接受的最高 threshold
+- threshold 范围 0.1 到 0.99，步长 0.01
+
+### 3. 评估 OOD / Unknown Rejection
+
+在 test split 上评估完整的推理逻辑：
+
+```bash
+python scripts/evaluate_ood.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --prototypes outputs/prototypes/baseline_prototypes.pt \
+  --threshold-json outputs/prototypes/baseline_threshold.json \
+  --split test \
+  --output-dir outputs/reports/ood_eval_baseline_test
+```
+
+输出指标：
+
+| 指标 | 含义 |
+|------|------|
+| known_accept_rate | known 样本被 prototype 接受的比例 |
+| known_reject_rate | known 样本被误判为 unknown 的比例 |
+| known_classification_accuracy_after_accept | 被接受的 known 样本中分类正确的比例 |
+| negative_reject_rate | negative 样本被拒绝的比例 |
+| false_known_rate | negative 样本被误判为 known 的比例 |
+| AUROC | known/negative 的区分度 |
+
+输出文件：
+- `ood_metrics.json` — 全部指标
+- `per_sample_predictions.csv` — 每个样本的预测详情
+- `per_class_ood_metrics.csv` — 每类指标
+- `nearest_similarity_histogram.png` — known vs negative 相似度分布
+- `threshold_curve.png` — threshold 搜索曲线
+- `final_confusion_matrix.png` — 最终混淆矩阵（含 unknown）
+- `report.html` — 完整 HTML 报告
+
+### 4. 单样本推理
+
+支持 prototype-based unknown rejection 的推理：
+
+```bash
+python scripts/infer.py \
+  --config configs/config.yaml \
+  --checkpoint outputs/checkpoints/best.pt \
+  --prototypes outputs/prototypes/baseline_prototypes.pt \
+  --threshold-json outputs/prototypes/baseline_threshold.json \
+  --input raw_pcd_dataset/test/class_000/000003.pcd
+```
+
+推理逻辑：
+1. 分类头预测 `pred_cls`
+2. 如果 `pred_cls == negative_label (19)` → `"negative"`
+3. 否则计算 embedding 与所有 known prototype 的 cosine similarity
+4. 如果 `max(similarity) < threshold` → `"unknown"`
+5. 否则 → `"known"`，使用最近 prototype 的类别
+
+输出 JSON：
+- `final_type`: `"known"` / `"negative"` / `"unknown"`
+- `final_label`: 最终预测类别名称
+- `reason`: 判定原因
+- `classifier_pred`: 分类头预测
+- `nearest_known_class`: 最近 prototype 类别
+- `nearest_similarity`: 与最近 prototype 的相似度
+- `similarity_threshold`: 使用的阈值
+- `top5_classifier_probs`: 分类头 top-5
+- `top5_prototype_similarities`: prototype top-5
+
+不带 `--prototypes` 时退化为纯分类器推理。
+
+### 配置
+
+```yaml
+prototype:
+  enabled: true
+  build_split: "train"
+  normalize_embeddings: true
+  use_known_only: true
+
+ood:
+  enabled: true
+  similarity_threshold: 0.65
+  threshold_min: 0.1
+  threshold_max: 0.99
+  threshold_step: 0.01
+  target_known_accept_rate: 0.95
+  threshold_selection: "max_negative_rejection_under_known_accept_constraint"
+```
+
+### 如何解读 OOD 结果
+
+- **known_accept_rate >= 0.95**：大部分 known 样本能正确通过 prototype 匹配
+- **known_reject_rate < 0.05**：prototype threshold 不会过度拒绝已知类
+- **negative_reject_rate**：当前因样本不足仅供参考，不作为主要判断依据
+- **AUROC**：如果可计算，> 0.9 表示 embedding 空间能有效区分 known/negative
+- **相似度分布直方图**：查看 known 和 negative 的 nearest similarity 是否有明显分离
+
 ## 训练（baseline）
 
 ```bash

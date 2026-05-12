@@ -76,4 +76,19 @@ _DEFAULT_CONFIG = {
     "analysis": {
         "focus_class_pairs": [],
     },
+    "prototype": {
+        "enabled": True,
+        "build_split": "train",
+        "normalize_embeddings": True,
+        "use_known_only": True,
+    },
+    "ood": {
+        "enabled": True,
+        "similarity_threshold": 0.65,
+        "threshold_min": 0.1,
+        "threshold_max": 0.99,
+        "threshold_step": 0.01,
+        "target_known_accept_rate": 0.95,
+        "threshold_selection": "max_negative_rejection_under_known_accept_constraint",
+    },
 }

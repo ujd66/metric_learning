@@ -68,3 +68,18 @@ sampler:
 analysis:
   focus_class_pairs:
     - ["changtiaofalan", "teshujiaqiangtieduantou"]
+
+prototype:
+  enabled: true
+  build_split: "train"
+  normalize_embeddings: true
+  use_known_only: true
+
+ood:
+  enabled: true
+  similarity_threshold: 0.65
+  threshold_min: 0.1
+  threshold_max: 0.99
+  threshold_step: 0.01
+  target_known_accept_rate: 0.95
+  threshold_selection: "max_negative_rejection_under_known_accept_constraint"
