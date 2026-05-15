@@ -22,7 +22,10 @@ def resolve_label(class_dir, label_mapping_cfg):
         return "negative", True
 
     # Check class_mapping.json: if class_name is in negative_names
-    class_mapping_path = os.path.join("raw_pcd_dataset", "class_mapping.json")
+    # Prefer label/class_mapping.json (authoritative) over raw_pcd_dataset/
+    class_mapping_path = os.path.join("label", "class_mapping.json")
+    if not os.path.exists(class_mapping_path):
+        class_mapping_path = os.path.join("raw_pcd_dataset", "class_mapping.json")
     if os.path.exists(class_mapping_path):
         with open(class_mapping_path) as f:
             class_mapping = json.load(f)

@@ -94,4 +94,10 @@ _DEFAULT_CONFIG = {
         "candidate_thresholds": [0.68, 0.75, 0.80, 0.85, 0.90, 0.92, 0.94, 0.96],
         "min_known_accept_rate": 0.95,
     },
+    "supported_classes": {
+        "enabled": True,
+        "supported_known_labels": list(range(19)),
+        "unsupported_known_labels": [],
+        "unsupported_policy": "none",
+    },
 }

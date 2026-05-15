@@ -1211,3 +1211,189 @@ python scripts/evaluate_embeddings.py \
 - **Similarity gap > 0.3**：embedding 区分度好，同类紧密、异类分离
 - **Recall@1 > 0.9**：最近邻检索效果优秀
 - **Top confusing pairs**：帮助发现哪些类别容易混淆，指导数据增强或类别合并
+
+## Phase 3.0：新增数据后的完整回归验证
+
+在新增 5208 个 PCD（含 class_014 44 个、qita/negative 256 个）后，用现有 PointNet baseline 跑完整回归。
+
+### 关键变更
+
+- **class_014 (shenggaozuofalan) 从 unsupported 变为 supported**：所有 19 个 known class 均有训练数据
+- **negative (qita) 样本从 ~16 增至 256**：OOD 评估更可信
+- **config.yaml**：`unsupported_known_labels: []`
+
+### 1. 一键回归
+
+```bash
+python scripts/run_full_regression.py \
+    --config configs/config.yaml \
+    --raw-root label \
+    --run-name newdata_pointnet_baseline_v1
+```
+
+执行 15 步管道：
+1. `prepare_pcd_dataset.py` — PCD → NPY
+2. `rebuild_split.py` — 分层划分 train/val/test
+3. `validate_dataset.py` — 数据验证
+4. `check_class_coverage.py` — 类别完整性检查（训练前）
+5. `train.py` — 训练
+6. `evaluate.py` — 分类评估
+7. `extract_embeddings.py` — 提取 test embedding
+8. `evaluate_embeddings.py` — embedding 质量评估
+9. `build_prototypes.py` — 构建 prototype
+10. `search_threshold.py` — threshold 搜索
+11. `evaluate_ood.py` — OOD 评估（含 threshold sweep）
+12. `build_gallery.py` — 构建 gallery
+13. `evaluate_retrieval.py` — retrieval 评估（含 threshold sweep）
+14. `check_class_coverage.py` — 类别完整性检查（训练后，含 prototypes/gallery）
+15. `generate_final_report.py` — 最终报告 + 对比
+
+所有输出在 `outputs/runs/{run_name}/`。
+
+可选参数：
+- `--skip-train`：跳过训练，复用已有 checkpoint
+- `--skip-data-prep`：跳过数据准备（prepare + rebuild）
+- `--train-ratio 0.7 --val-ratio 0.15 --test-ratio 0.15`：自定义划分比例
+
+### 2. 最终报告
+
+```bash
+python scripts/generate_final_report.py \
+    --config configs/config.yaml \
+    --run-name newdata_pointnet_baseline_v1 \
+    --run-dir outputs/runs/newdata_pointnet_baseline_v1 \
+    --checkpoint outputs/checkpoints/best.pt \
+    --prototypes outputs/runs/newdata_pointnet_baseline_v1/prototypes/baseline_prototypes.pt \
+    --threshold-json outputs/runs/newdata_pointnet_baseline_v1/prototypes/baseline_threshold.json \
+    --gallery outputs/runs/newdata_pointnet_baseline_v1/gallery/baseline_train_gallery.pt
+```
+
+报告内容：
+1. 数据分布（每类 train/val/test 数量）
+2. 类别完整性（class_014 是否有 train/prototype/gallery）
+3. 分类指标（overall acc、macro F1、per-class P/R/F1）
+4. Embedding 指标（NN acc、similarity gap、top confusing pairs）
+5. OOD 指标（AUROC、known_accept、negative_reject）
+6. Threshold sweep
+7. Retrieval 指标
+8. class_014 单独指标
+9. Negative 单独指标
+10. 是否可替代旧版本
+
+输出：
+- `final_report.html` / `final_report.json`
+- `comparison_to_previous.html` — 与旧版本对比
+
+### 3. class_014 验证确认
+
+回归完成后确认：
+- `check_class_coverage.py` 输出 class_014 status = OK（有 train 样本）
+- `prototypes.pt` 中 class_014 的 class_support > 0
+- `gallery.pt` 中包含 class_014 的样本
+- `final_report.html` 显示 class_014 为 SUPPORTED
+
+### 4. 进入 PointNet++ / PointNeXt 对比阶段
+
+回归完成后：
+1. 确认 19 类全部 supported，coverage status = PASS 或 WARNING
+2. 确认 macro F1、AUROC 等指标合理
+3. 用此轮结果作为 PointNet baseline 基准
+4. 引入 PointNet++ / PointNeXt，跑相同管道，对比指标
+
+## Phase 3.1：PointNet 下的 CE-only vs CE+SupCon 受控对比
+
+Phase 3.0 的 baseline 实际使用了 CE + SupCon（metric_weight=0.05, warmup=10），
+因此它不是纯 CE baseline。为了科学评估 SupCon 的实际贡献，
+本轮在 **完全相同的数据划分** 上补跑一个纯 CE 实验。
+
+### 1. 为什么要补跑 CE-only
+
+- Phase 3.0 的 "baseline" 包含了 SupCon 损失，无法判断 SupCon 是否真的带来了提升
+- 受控对比需要：相同数据、相同模型结构（PointNet）、仅损失函数不同
+- 结论将指导 PointNet++ / PointNeXt 阶段是否继续使用 SupCon
+
+### 2. 实验配置
+
+两个配置文件位于 `configs/experiments/`：
+
+| 配置 | metric_learning.enabled | metric_weight | warmup |
+|------|------------------------|---------------|--------|
+| `pointnet_ce_only_newdata.yaml` | false | 0.0 | 0 |
+| `pointnet_ce_supcon_newdata.yaml` | true | 0.05 | 10 |
+
+其他所有参数完全相同（seed=42, epochs=100, class_weight_max=10.0, etc.）。
+
+### 3. 如何运行
+
+**重要**：不要重建 split。直接复用 `dataset/` 目录（Phase 3.0 已建好的 train/val/test 划分）。
+
+#### 3a. 跑 CE-only
+
+```bash
+python scripts/run_full_regression.py \
+    --config configs/experiments/pointnet_ce_only_newdata.yaml \
+    --raw-root label \
+    --run-name newdata_pointnet_ce_only_v1 \
+    --skip-data-prep
+```
+
+#### 3b. 跑 CE+SupCon
+
+```bash
+python scripts/run_full_regression.py \
+    --config configs/experiments/pointnet_ce_supcon_newdata.yaml \
+    --raw-root label \
+    --run-name newdata_pointnet_ce_supcon_v1 \
+    --skip-data-prep
+```
+
+> **注意**：两个实验使用 `--skip-data-prep` 以复用相同的 `dataset/` 划分。
+> 输出分别保存在 `outputs/runs/newdata_pointnet_ce_only_v1/` 和
+> `outputs/runs/newdata_pointnet_ce_supcon_v1/`。
+
+### 4. 如何生成对比报告
+
+```bash
+python scripts/compare_runs.py \
+    --runs outputs/runs/newdata_pointnet_ce_only_v1 \
+           outputs/runs/newdata_pointnet_ce_supcon_v1 \
+    --labels "CE-only" "CE+SupCon" \
+    --output-dir outputs/reports/newdata_pointnet_controlled_comparison
+```
+
+输出文件：
+| 文件 | 内容 |
+|------|------|
+| `comparison.csv` | 所有指标对比表格（含 delta） |
+| `comparison.json` | 完整对比数据 + 自动结论 |
+| `comparison_report.html` | 可视化对比报告 |
+
+### 5. 对比指标
+
+| 维度 | 指标 |
+|------|------|
+| 分类 | Overall Acc, Macro F1, Known Acc |
+| class_014 | Precision / Recall / F1 |
+| Negative | Precision / Recall / F1 |
+| 最差类别 | F1 最低的 5 个类 |
+| Embedding | Intra/Inter Sim, Gap, NN Acc, Recall@1/5 |
+| OOD | Threshold, Known Accept, Negative Reject, AUROC |
+| Retrieval | Top1 Acc, AUROC, Recall@1/5 |
+| Confusing Pairs | Top 5 最容易混淆的类别对 |
+
+### 6. 自动结论
+
+`compare_runs.py` 会自动判断：
+
+1. **CE+SupCon 是否优于 CE-only**：比较 Macro F1, Similarity Gap, OOD AUROC
+2. **是否存在 embedding 退化**：SupCon 的 similarity gap 是否下降
+3. **是否存在 negative recall 下降**：SupCon 是否导致 negative 检出率降低
+4. **是否推荐在 PointNet++ 中继续使用 SupCon**
+
+### 7. 什么时候进入 PointNet++ / PointNeXt
+
+1. 完成本轮对比，确定 SupCon 是否有效
+2. 如果 CE+SupCon 优于 CE-only → 在 PointNet++ 中继续使用 SupCon
+3. 如果 CE-only 优于 CE+SupCon → 尝试调参（metric_weight, temperature）或放弃 SupCon
+4. 用当前最佳 PointNet 结果作为基准，引入新 backbone 进行对比
+5. **不要在 PointNet++ 测试之前引入 OpenPoints**

@@ -1,3 +1,7 @@
+# Phase 3.1 Experiment: PointNet CE + SupCon
+# Cross-entropy + Supervised Contrastive loss with warmup.
+# Same as the Phase 3.0 baseline, replicated here for controlled comparison.
+
 seed: 42
 device: "cuda"
 num_points: 2048
@@ -39,10 +43,9 @@ train:
   use_class_weight: true
   class_weight_max: 10.0
 
-# When metric_learning.enabled=false, training is identical to baseline CE.
 experiment:
-  name: "pointnet_ce_supcon"
-  output_subdir: "ce_supcon"
+  name: "newdata_pointnet_ce_supcon_v1"
+  output_subdir: "newdata_pointnet_ce_supcon_v1"
 
 loss:
   ce_weight: 1.0

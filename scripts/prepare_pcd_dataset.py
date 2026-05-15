@@ -23,8 +23,26 @@ def _parse_label_from_dirname(dirname):
     raise ValueError(f"Cannot parse label from directory name: {dirname}")
 
 
+def _build_reverse_mapping():
+    """Build reverse mapping from class name -> (class_xxx, label) from class_mapping.json."""
+    reverse = {}
+    for search_path in ["label/class_mapping.json", "raw_pcd_dataset/class_mapping.json"]:
+        if os.path.exists(search_path):
+            with open(search_path) as f:
+                mapping = json.load(f)
+            for class_dir, class_name in mapping.items():
+                reverse[class_name] = (class_dir, _parse_label_from_dirname(class_dir))
+            break
+    return reverse
+
+
 def resolve_class_dir(class_dir, label_mapping_cfg):
     """Check if a class_dir should be mapped to negative.
+
+    Supports:
+      - class_xxx format (standard)
+      - Real class names (e.g., "cewenqi") via reverse mapping from class_mapping.json
+      - Negative names (e.g., "qita")
 
     Returns (output_class_dir, label).
     """
@@ -35,21 +53,32 @@ def resolve_class_dir(class_dir, label_mapping_cfg):
     if class_dir.lower() in negative_names:
         return "negative", force_neg_label
 
-    # Check class_mapping.json
-    class_mapping_path = os.path.join("raw_pcd_dataset", "class_mapping.json")
+    # Check class_mapping.json for negative mapping
+    class_mapping_path = os.path.join("label", "class_mapping.json")
+    if not os.path.exists(class_mapping_path):
+        class_mapping_path = os.path.join("raw_pcd_dataset", "class_mapping.json")
     if os.path.exists(class_mapping_path):
         with open(class_mapping_path) as f:
             class_mapping = json.load(f)
+        # Direct lookup: class_xxx -> name
         class_name = class_mapping.get(class_dir, "")
         if class_name.lower() in negative_names:
             return "negative", force_neg_label
 
-    # Normal class
+    # Try standard class_xxx format
     try:
         label = _parse_label_from_dirname(class_dir)
+        return class_dir, label
     except ValueError:
-        return None, None
-    return class_dir, label
+        pass
+
+    # Try reverse mapping: real name -> class_xxx
+    reverse = _build_reverse_mapping()
+    if class_dir in reverse:
+        output_dir, label = reverse[class_dir]
+        return output_dir, label
+
+    return None, None
 
 
 def convert_single(pcd_path, label, class_name, sample_id, use_intensity=False):
