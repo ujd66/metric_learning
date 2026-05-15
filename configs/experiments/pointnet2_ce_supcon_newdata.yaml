@@ -1,3 +1,7 @@
+# Phase 3A Experiment: PointNet++ SSG CE + SupCon
+# Backbone: PointNet++ (SSG, kNN grouping)
+# Loss: Cross-entropy + Supervised Contrastive with warmup.
+
 seed: 42
 device: "cuda"
 num_points: 2048
@@ -9,7 +13,7 @@ num_classes: 20
 embedding_dim: 256
 
 model:
-  backbone: "pointnet"
+  backbone: "pointnet2"
 
 label_mapping:
   negative_names: ["negative", "qita", "other", "others", "其他"]
@@ -42,10 +46,9 @@ train:
   use_class_weight: true
   class_weight_max: 10.0
 
-# When metric_learning.enabled=false, training is identical to baseline CE.
 experiment:
-  name: "pointnet_ce_supcon"
-  output_subdir: "ce_supcon"
+  name: "newdata_pointnet2_ce_supcon_v1"
+  output_subdir: "newdata_pointnet2_ce_supcon_v1"
 
 loss:
   ce_weight: 1.0

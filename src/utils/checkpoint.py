@@ -11,6 +11,18 @@ def save_checkpoint(model, optimizer, epoch, path, **kwargs):
     torch.save(state, path)
 
 
+def save_checkpoint_with_config(model, optimizer, epoch, path, cfg, **kwargs):
+    """Save checkpoint with the full config baked in for backbone recovery."""
+    state = {
+        "epoch": epoch,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "config": cfg,
+    }
+    state.update(kwargs)
+    torch.save(state, path)
+
+
 def load_checkpoint(path, model, optimizer=None):
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])

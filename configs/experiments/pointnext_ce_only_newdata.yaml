@@ -1,3 +1,7 @@
+# Phase 3A Experiment: PointNeXt (via OpenPoints) CE-only baseline
+# Backbone: PointNeXt-S (requires OpenPoints)
+# Loss: Pure cross-entropy, no metric learning.
+
 seed: 42
 device: "cuda"
 num_points: 2048
@@ -9,7 +13,9 @@ num_classes: 20
 embedding_dim: 256
 
 model:
-  backbone: "pointnet"
+  backbone: "pointnext"
+  openpoints_cfg:
+    type: "pointnext_s"
 
 label_mapping:
   negative_names: ["negative", "qita", "other", "others", "其他"]
@@ -42,21 +48,20 @@ train:
   use_class_weight: true
   class_weight_max: 10.0
 
-# When metric_learning.enabled=false, training is identical to baseline CE.
 experiment:
-  name: "pointnet_ce_supcon"
-  output_subdir: "ce_supcon"
+  name: "newdata_pointnext_ce_only_v1"
+  output_subdir: "newdata_pointnext_ce_only_v1"
 
 loss:
   ce_weight: 1.0
   metric_type: "supcon"
-  metric_weight: 0.05
+  metric_weight: 0.0
   temperature: 0.07
   include_negative_in_metric_loss: false
-  warmup_epochs_for_metric_loss: 10
+  warmup_epochs_for_metric_loss: 0
 
 metric_learning:
-  enabled: true
+  enabled: false
   normalize_embedding: true
   exclude_negative: true
   hard_pair_focus: true

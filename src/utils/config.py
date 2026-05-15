@@ -21,6 +21,9 @@ _DEFAULT_CONFIG = {
     "negative_label": 19,
     "num_classes": 20,
     "embedding_dim": 256,
+    "model": {
+        "backbone": "pointnet",
+    },
     "label_mapping": {
         "negative_names": ["negative", "qita", "other", "others", "其他"],
         "force_negative_label": 19,

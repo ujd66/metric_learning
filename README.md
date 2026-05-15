@@ -1397,3 +1397,163 @@ python scripts/compare_runs.py \
 3. 如果 CE-only 优于 CE+SupCon → 尝试调参（metric_weight, temperature）或放弃 SupCon
 4. 用当前最佳 PointNet 结果作为基准，引入新 backbone 进行对比
 5. **不要在 PointNet++ 测试之前引入 OpenPoints**
+
+---
+
+## Phase 3A：Backbone Ablation（PointNet / PointNet++ / PointNeXt / OpenPoints）
+
+### 1. 为什么要做 Backbone Ablation
+
+PointNet 使用全局 max pooling 提取特征，不捕获局部几何结构。对于法兰、接头等形状相似的类别，局部特征可能更有区分力。PointNet++ 通过层级 Set Abstraction 捕获多尺度局部特征，理论上更适合细粒度分类。
+
+**Phase 3.1 PointNet 基线结果**：
+
+| 指标 | PointNet CE | PointNet CE+SupCon |
+|------|-------------|-------------------|
+| Overall Acc | 0.8808 | 0.8821 |
+| Macro F1 | **0.7554** | 0.7406 |
+| Known Acc | 0.8988 | 0.8974 |
+| Negative Acc | 0.5385 | 0.5897 |
+| Similarity Gap | 0.7442 | 0.6967 |
+| Recall@1 | 0.9000 | 0.9176 |
+| OOD AUROC | 0.8925 | **0.9195** |
+| Negative Reject | 0.641 | **0.718** |
+
+**结论**：CE-only 分类 Macro F1 更好；CE+SupCon 在 OOD、retrieval、negative reject 更好。当前主候选为 PointNet + CE+SupCon。
+
+### 2. 可插拔 Backbone 架构
+
+所有 backbone 通过 `model_factory.py` 统一管理：
+
+```python
+from src.models.model_factory import build_model
+
+# config.yaml 中设置 model.backbone
+model = build_model(config)
+# 所有模型 forward 返回统一格式：
+# {"embedding": Tensor [B, 256], "logits": Tensor [B, 20]}
+```
+
+支持的 backbone：
+
+| Backbone | model.backbone | 依赖 | 状态 |
+|----------|---------------|------|------|
+| PointNet | `"pointnet"` | 无 | 基线 |
+| PointNet++ SSG | `"pointnet2"` | 无 | 新增 |
+| PointNeXt-S | `"pointnext"` | OpenPoints (可选) | 新增 |
+| OpenPoints | `"openpoints"` | OpenPoints (可选) | 新增 |
+
+### 3. 如何训练 PointNet++
+
+**CE-only**：
+
+```bash
+python scripts/run_full_regression.py \
+    --config configs/experiments/pointnet2_ce_only_newdata.yaml \
+    --raw-root label \
+    --run-name newdata_pointnet2_ce_only_v1
+```
+
+**CE+SupCon**：
+
+```bash
+python scripts/run_full_regression.py \
+    --config configs/experiments/pointnet2_ce_supcon_newdata.yaml \
+    --raw-root label \
+    --run-name newdata_pointnet2_ce_supcon_v1
+```
+
+PointNet++ 为内置实现（SSG，kNN grouping），无需额外依赖。
+
+### 4. 如何训练 PointNeXt / OpenPoints
+
+> 需要先安装 OpenPoints：`pip install openpoints`
+
+**CE-only**：
+
+```bash
+python scripts/run_full_regression.py \
+    --config configs/experiments/pointnext_ce_only_newdata.yaml \
+    --raw-root label \
+    --run-name newdata_pointnext_ce_only_v1
+```
+
+**CE+SupCon**：
+
+```bash
+python scripts/run_full_regression.py \
+    --config configs/experiments/pointnext_ce_supcon_newdata.yaml \
+    --raw-root label \
+    --run-name newdata_pointnext_ce_supcon_v1
+```
+
+如果未安装 OpenPoints，会收到清晰错误提示。不影响 PointNet / PointNet++ 的使用。
+
+在 config 中可切换 PointNeXt 变体：
+
+```yaml
+model:
+  backbone: "pointnext"
+  openpoints_cfg:
+    type: "pointnext_s"   # 可选: pointnext_s, pointnext_b, pointnext_l
+```
+
+### 5. 如何比较不同 Backbone
+
+**全量对比**：
+
+```bash
+python scripts/compare_backbones.py \
+    --runs \
+        outputs/runs/newdata_pointnet_ce_only_v1 \
+        outputs/runs/newdata_pointnet_ce_supcon_v1 \
+        outputs/runs/newdata_pointnet2_ce_only_v1 \
+        outputs/runs/newdata_pointnet2_ce_supcon_v1 \
+    --labels \
+        "PointNet CE" \
+        "PointNet CE+SupCon" \
+        "PointNet++ CE" \
+        "PointNet++ CE+SupCon" \
+    --output-dir outputs/reports/backbone_ablation
+```
+
+输出：
+- `backbone_comparison.csv` — 所有指标数值表
+- `backbone_comparison.json` — 机器可读格式
+- `backbone_comparison_report.html` — 可视化 HTML 报告（最佳值高亮）
+
+**推理耗时对比**：
+
+```bash
+# PointNet
+python scripts/benchmark_inference.py \
+    --config configs/experiments/pointnet_ce_supcon_newdata.yaml \
+    --checkpoint outputs/runs/newdata_pointnet_ce_supcon_v1/checkpoints/best.pt \
+    --input-dir dataset/test --num-samples 100
+
+# PointNet++
+python scripts/benchmark_inference.py \
+    --config configs/experiments/pointnet2_ce_supcon_newdata.yaml \
+    --checkpoint outputs/runs/newdata_pointnet2_ce_supcon_v1/checkpoints/best.pt \
+    --input-dir dataset/test --num-samples 100
+```
+
+### 6. 如何判断是否替换当前主模型
+
+切换主模型需要同时满足以下条件：
+
+1. **分类性能**：新 backbone 的 Macro F1 >= PointNet 基线（0.7554）
+2. **OOD 能力**：新 backbone 的 OOD AUROC >= PointNet 基线（0.9195 for CE+SupCon）
+3. **Negative 拒绝**：Negative Reject Rate >= PointNet 基线（0.718）
+4. **class_014**：class_014 F1 不低于 PointNet 基线
+5. **推理耗时**：推理速度不超过 PointNet 的 3 倍
+6. **参数量**：模型大小在可接受范围内
+
+**决策流程**：
+
+| 场景 | 决策 |
+|------|------|
+| 新 backbone 全面优于 PointNet | 切换为主模型 |
+| 分类更好但 OOD 更差 | 保留 PointNet，新 backbone 仅用于分类场景 |
+| OOD 更好但分类更差 | 暂不切换，尝试调参 |
+| 全面更差 | 放弃，继续用 PointNet |

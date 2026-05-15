@@ -31,8 +31,7 @@ from tqdm import tqdm
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.datasets.pointcloud_dataset import PointCloudDataset
-from src.models.metric_model import MetricPointNet
-from src.utils.checkpoint import load_checkpoint
+from src.models.model_factory import build_model_from_checkpoint
 from src.utils.config import load_config
 
 
@@ -596,12 +595,8 @@ def main():
             class_names_map = json.load(f)
 
     # Load model
-    model = MetricPointNet(
-        input_channels=cfg["input_channels"],
-        num_classes=cfg["num_classes"],
-        embedding_dim=cfg["embedding_dim"],
-    ).to(device)
-    load_checkpoint(args.checkpoint, model)
+    model, _ = build_model_from_checkpoint(cfg, args.checkpoint)
+    model = model.to(device)
 
     # Load query dataset
     dataset = PointCloudDataset(

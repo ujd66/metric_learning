@@ -14,8 +14,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from src.datasets.pointcloud_dataset import PointCloudDataset
 from src.metrics.classification_metrics import compute_metrics
-from src.models.metric_model import MetricPointNet
-from src.utils.checkpoint import load_checkpoint, save_checkpoint
+from src.models.model_factory import build_model
+from src.utils.checkpoint import load_checkpoint, save_checkpoint, save_checkpoint_with_config
 from src.utils.config import load_config
 from src.utils.logger import get_logger
 from src.utils.seed import set_seed
@@ -273,6 +273,8 @@ def main():
 
     logger.info(f"Config: {cfg}")
     logger.info(f"Device: {device}")
+    backbone = cfg.get("model", {}).get("backbone", "pointnet")
+    logger.info(f"Backbone: {backbone}")
     logger.info(f"Metric learning: {'ENABLED' if metric_learning_enabled else 'DISABLED'}")
     if metric_learning_enabled:
         logger.info(f"  CE weight={ce_weight}, metric weight={metric_weight_target}, "
@@ -349,11 +351,7 @@ def main():
     )
 
     # --- Model ---
-    model = MetricPointNet(
-        input_channels=cfg["input_channels"],
-        num_classes=cfg["num_classes"],
-        embedding_dim=cfg["embedding_dim"],
-    ).to(device)
+    model = build_model(cfg).to(device)
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -488,9 +486,9 @@ def main():
             "metric_weight": metric_weight_current,
         })
 
-        # Save last checkpoint
+        # Save last checkpoint (with config for backbone recovery)
         last_ckpt_path = os.path.join(ckpt_dir, "last.pt")
-        save_checkpoint(model, optimizer, epoch + 1, last_ckpt_path, metrics=val_metrics)
+        save_checkpoint_with_config(model, optimizer, epoch + 1, last_ckpt_path, cfg, metrics=val_metrics)
         # Also save to old location for backward compat
         save_checkpoint(model, optimizer, epoch + 1, "outputs/checkpoints/last.pt", metrics=val_metrics)
 
@@ -499,7 +497,7 @@ def main():
         if current_metric > best_val_f1:
             best_val_f1 = current_metric
             best_ckpt_path = os.path.join(ckpt_dir, "best.pt")
-            save_checkpoint(model, optimizer, epoch + 1, best_ckpt_path, metrics=val_metrics)
+            save_checkpoint_with_config(model, optimizer, epoch + 1, best_ckpt_path, cfg, metrics=val_metrics)
             # Also save to old location
             save_checkpoint(model, optimizer, epoch + 1, "outputs/checkpoints/best.pt", metrics=val_metrics)
 

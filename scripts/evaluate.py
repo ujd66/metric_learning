@@ -17,8 +17,7 @@ from src.metrics.classification_metrics import (
     plot_confusion_matrix,
     plot_normalized_confusion_matrix,
 )
-from src.models.metric_model import MetricPointNet
-from src.utils.checkpoint import load_checkpoint
+from src.models.model_factory import build_model_from_checkpoint
 from src.utils.config import load_config
 
 
@@ -107,12 +106,8 @@ def main():
 
     loader = DataLoader(dataset, batch_size=cfg["train"]["batch_size"], shuffle=False, num_workers=4, collate_fn=collate_fn)
 
-    model = MetricPointNet(
-        input_channels=cfg["input_channels"],
-        num_classes=num_classes,
-        embedding_dim=cfg["embedding_dim"],
-    ).to(device)
-    load_checkpoint(args.checkpoint, model)
+    model, _ = build_model_from_checkpoint(cfg, args.checkpoint)
+    model = model.to(device)
 
     metrics, y_true, y_pred = run_evaluation(model, loader, device, num_known_classes, negative_label)
 
